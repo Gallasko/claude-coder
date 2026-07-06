@@ -1,8 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Session } from './session';
 import { TOOL_DEFINITIONS, ToolContext, executeTool } from './tools';
-import { SYSTEM_PROMPT } from './prompt';
-import { addUsage, supportsEffort } from './models';
+import { SYSTEM_PROMPT, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
+import { addUsage, supportsAdaptiveThinking, supportsEffort } from './models';
 
 export interface TurnEvents {
   onText: (delta: string) => void;
@@ -10,6 +10,8 @@ export interface TurnEvents {
   onToolResult: (name: string, ok: boolean, preview: string) => void;
   onRequestDone: (usage: Anthropic.Usage) => void;
   onNotice: (message: string) => void;
+  /** Live activity signal: current phase + approximate output tokens this turn. */
+  onProgress: (phase: string, approxTokens: number) => void;
 }
 
 export interface TurnResult {
@@ -18,6 +20,9 @@ export interface TurnResult {
 }
 
 const MAX_TOOL_ROUNDS = 40;
+const PROGRESS_INTERVAL_MS = 300;
+/** Rough chars-per-token for progress display only (never for billing). */
+const CHARS_PER_TOKEN = 4;
 
 /**
  * Run one user turn: send the message, execute tool calls until the model
@@ -32,7 +37,8 @@ export async function runTurn(
   toolCtx: ToolContext,
   maxTokens: number,
   events: TurnEvents,
-  signal: AbortSignal
+  signal: AbortSignal,
+  minimizeOutput = false
 ): Promise<TurnResult> {
   session.messages.push({
     role: 'user',
@@ -42,19 +48,40 @@ export async function runTurn(
   let finalText = '';
   let stopReason: string | null = null;
 
+  // Turn-level progress counter: approximated from streamed chars, re-synced
+  // to the real usage numbers at the end of every request.
+  let approxChars = 0;
+  let realOutputTokens = 0;
+  let lastEmit = 0;
+  let lastPhase = '';
+  const progress = (phase: string, chars: number, force = false) => {
+    approxChars += chars;
+    const now = Date.now();
+    if (force || phase !== lastPhase || now - lastEmit > PROGRESS_INTERVAL_MS) {
+      lastPhase = phase;
+      lastEmit = now;
+      events.onProgress(phase, realOutputTokens + Math.round(approxChars / CHARS_PER_TOKEN));
+    }
+  };
+
+  progress('sending request', 0, true);
+
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     if (signal.aborted) {
       throw new Error('cancelled');
     }
     placeCacheMarkers(session.messages);
 
-    const response = await streamOnce(client, session, maxTokens, events, signal);
+    const response = await streamOnce(client, session, maxTokens, events, signal, progress, minimizeOutput);
 
     addUsage(session.totals, response.usage);
     session.lastInputTokens =
       (response.usage.input_tokens ?? 0) +
       (response.usage.cache_read_input_tokens ?? 0) +
       (response.usage.cache_creation_input_tokens ?? 0);
+    // Re-sync the approximate counter to reality.
+    realOutputTokens += response.usage.output_tokens ?? 0;
+    approxChars = 0;
     events.onRequestDone(response.usage);
 
     // Echo the assistant content back verbatim (thinking blocks included).
@@ -88,6 +115,7 @@ export async function runTurn(
     }
 
     // Execute all requested tools concurrently, return results in ONE user message.
+    progress('running tools', 0, true);
     const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
     const results = await Promise.all(
       toolUses.map(async (tu) => {
@@ -103,6 +131,7 @@ export async function runTurn(
       })
     );
     session.messages.push({ role: 'user', content: results });
+    progress('sending request', 0, true);
   }
 
   return { stopReason, finalText };
@@ -113,7 +142,9 @@ async function streamOnce(
   session: Session,
   maxTokens: number,
   events: TurnEvents,
-  signal: AbortSignal
+  signal: AbortSignal,
+  progress: (phase: string, chars: number, force?: boolean) => void,
+  minimizeOutput = false
 ): Promise<Anthropic.Message> {
   const common = {
     model: session.model,
@@ -121,18 +152,41 @@ async function streamOnce(
     system: [
       {
         type: 'text' as const,
-        text: SYSTEM_PROMPT,
+        // Both parts are frozen constants, so the cache prefix stays stable
+        // for as long as the minimizeOutputTokens setting is unchanged.
+        text: minimizeOutput ? SYSTEM_PROMPT + MINIMAL_OUTPUT_ADDENDUM : SYSTEM_PROMPT,
         cache_control: { type: 'ephemeral' as const },
       },
     ],
     tools: TOOL_DEFINITIONS,
     messages: session.messages,
     ...(supportsEffort(session.model) ? { output_config: { effort: session.effort } } : {}),
+    // Summarized display makes thinking stream as text deltas, so the UI can
+    // show live progress instead of a silent pause. Billing is unchanged.
+    // Thinking tokens are billed as output, so minimize mode skips thinking.
+    ...(supportsAdaptiveThinking(session.model) && !minimizeOutput
+      ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } }
+      : {}),
+  };
+
+  const trackProgress = (event: any) => {
+    if (event.type === 'content_block_delta') {
+      const d = event.delta;
+      if (d?.type === 'thinking_delta') {
+        progress('thinking', (d.thinking ?? '').length);
+      } else if (d?.type === 'text_delta') {
+        progress('writing', (d.text ?? '').length);
+      } else if (d?.type === 'input_json_delta') {
+        progress('preparing tool call', (d.partial_json ?? '').length);
+      }
+    } else if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
+      progress('thinking', 0, true);
+    }
   };
 
   if (session.model === 'claude-fable-5') {
-    // Fable: thinking always on (omit the param); opt into server-side
-    // refusal fallback so benign-adjacent work degrades to Opus instead of failing.
+    // Fable: opt into server-side refusal fallback so benign-adjacent work
+    // degrades to Opus instead of failing.
     const stream = client.beta.messages.stream(
       {
         ...(common as any),
@@ -142,12 +196,14 @@ async function streamOnce(
       { signal }
     );
     stream.on('text', events.onText);
+    stream.on('streamEvent', trackProgress);
     const message = await stream.finalMessage();
     return message as unknown as Anthropic.Message;
   }
 
   const stream = client.messages.stream(common as Anthropic.MessageStreamParams, { signal });
   stream.on('text', events.onText);
+  stream.on('streamEvent', trackProgress);
   return stream.finalMessage();
 }
 

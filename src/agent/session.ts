@@ -16,8 +16,12 @@ export class Session {
   taskSummary = '';
   /** Notes carried over from a previous session (task switch or escalation). */
   carryOver: string | undefined;
+  /** Terse plan drafted by the reasoning-tier model before Sonnet implements it. */
+  plan: string | undefined;
   /** Last known total input size, to decide when to warn about context growth. */
   lastInputTokens = 0;
+  /** Whole-file hashes already sent verbatim in this session's transcript. */
+  readCache: Map<string, string> = new Map();
 
   constructor(
     public model: string,

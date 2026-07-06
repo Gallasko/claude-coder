@@ -22,6 +22,17 @@ export function supportsEffort(model: string): boolean {
   return model !== 'claude-haiku-4-5';
 }
 
+/**
+ * Extended thinking is reserved for the reasoning tier (Opus/Fable) — that's
+ * where planning happens. Sonnet's job is mechanical implementation off an
+ * already-made plan, so it skips thinking entirely: thinking tokens are
+ * billed as output at the same 5x rate as everything else, and Sonnet
+ * shouldn't need to "think out loud" to follow a plan it was handed.
+ */
+export function supportsAdaptiveThinking(model: string): boolean {
+  return model === 'claude-opus-4-8' || model === 'claude-fable-5';
+}
+
 export function displayName(model: string): string {
   const names: Record<string, string> = {
     'claude-haiku-4-5': 'Haiku 4.5',
@@ -34,10 +45,16 @@ export function displayName(model: string): string {
 
 export type Complexity = 'trivial' | 'standard' | 'hard';
 
-export const EFFORT_BY_COMPLEXITY: Record<Complexity, 'low' | 'high' | 'xhigh'> = {
+/**
+ * Implementation always runs on Sonnet at low or high effort — `xhigh` is
+ * reserved for the manual escalation ladder. Hard tasks get their deep
+ * reasoning from a separate Opus/Fable planning pass (see planner.ts)
+ * instead of cranking Sonnet's own effort/thinking up.
+ */
+export const EFFORT_BY_COMPLEXITY: Record<Complexity, 'low' | 'high'> = {
   trivial: 'low',
   standard: 'high',
-  hard: 'xhigh',
+  hard: 'high',
 };
 
 export interface UsageTotals {

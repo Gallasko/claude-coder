@@ -1,13 +1,20 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import Anthropic from '@anthropic-ai/sdk';
-import { SessionManager } from './agent/session';
+import { Session, SessionManager } from './agent/session';
 import { runTurn } from './agent/loop';
 import { classifyPrompt } from './agent/classifier';
+import { planTask } from './agent/planner';
+import { compressPrompt } from './agent/compressor';
+import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
+import { MemoryStore } from './agent/memory';
 import {
   CLASSIFIER_MODEL,
+  Complexity,
   EFFORT_BY_COMPLEXITY,
   UsageTotals,
+  addUsage,
   costUsd,
   displayName,
   emptyTotals,
@@ -27,6 +34,10 @@ export class Controller {
   private client: Anthropic | undefined;
   readonly sessions: SessionManager;
   private classifierTotals: UsageTotals = emptyTotals();
+  /** Running USD cost of planning calls — kept as a plain sum, not UsageTotals,
+   *  because the planning model (Opus vs Fable) can differ call to call. */
+  private plannerCost = 0;
+  private plannerRequests = 0;
   private abort: AbortController | undefined;
   private ui: UiSink | undefined;
   private statusBar: vscode.StatusBarItem;
@@ -36,6 +47,7 @@ export class Controller {
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
   private permissionId = 0;
   private alwaysAllowed: Set<string>;
+  private memory: MemoryStore | undefined;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -58,6 +70,38 @@ export class Controller {
 
   private ladder(): string[] {
     return this.config().get<string[]>('modelLadder') ?? ['claude-sonnet-5'];
+  }
+
+  private planningEnabled(): boolean {
+    return this.config().get<boolean>('planningEnabled') ?? true;
+  }
+
+  private planningModelLadder(): string[] {
+    return this.config().get<string[]>('planningModelLadder') ?? ['claude-opus-4-8', 'claude-fable-5'];
+  }
+
+  private planningMaxTokens(): number {
+    return this.config().get<number>('planningMaxTokens') ?? 1024;
+  }
+
+  private compressLongPrompts(): boolean {
+    return this.config().get<boolean>('compressLongPrompts') ?? false;
+  }
+
+  private compressionThresholdChars(): number {
+    return this.config().get<number>('compressionThresholdChars') ?? 4000;
+  }
+
+  private autoCompact(): boolean {
+    return this.config().get<boolean>('autoCompact') ?? true;
+  }
+
+  private compactionMaxTokens(): number {
+    return this.config().get<number>('compactionMaxTokens') ?? 800;
+  }
+
+  private minimizeOutputTokens(): boolean {
+    return this.config().get<boolean>('minimizeOutputTokens') ?? false;
   }
 
   private post(message: Record<string, unknown>): void {
@@ -144,17 +188,46 @@ export class Controller {
     this.abort = new AbortController();
     try {
       const client = await this.getClient();
+      const memory = await this.ensureMemory();
+
+      // Long, prose-heavy prompts (pasted logs, specs) get shrunk by Haiku
+      // before they ever reach the expensive model. Opt-in: this rewrites
+      // the user's own words, so it's off by default.
+      if (this.compressLongPrompts() && text.length > this.compressionThresholdChars()) {
+        try {
+          const { text: compressed, usage } = await compressPrompt(
+            client,
+            CLASSIFIER_MODEL,
+            text,
+            Math.min(2000, Math.ceil(this.compressionThresholdChars() / 2))
+          );
+          addUsage(this.classifierTotals, usage);
+          if (compressed && compressed.length < text.length * 0.9) {
+            this.post({ type: 'notice', text: `Compressed a long prompt (${text.length} → ${compressed.length} chars) before sending.` });
+            text = compressed;
+          }
+        } catch (e: any) {
+          this.log.appendLine(`[compress error] ${e?.message ?? e}`);
+        }
+      }
+
       const session = await this.routePrompt(client, text);
 
       // First message of a session carries the dynamic context the frozen
       // system prompt must not contain (cache discipline).
       let content = text;
       if (session.messages.length === 0) {
-        content = this.buildFirstMessagePreamble(session.carryOver) + text;
+        content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan) + text;
       }
 
-      const toolCtx = this.buildToolContext();
+      const toolCtx = this.buildToolContext(session, memory);
       const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
+      const minimize = this.minimizeOutputTokens();
+      if (minimize) {
+        // Effort drives how much the model reasons/writes — clamp it to the
+        // floor everywhere (including escalations) when minimizing output.
+        session.effort = 'low';
+      }
 
       const result = await runTurn(client, session, content, toolCtx, maxTokens, {
         onText: (delta) => this.post({ type: 'delta', text: delta }),
@@ -172,11 +245,16 @@ export class Controller {
           this.postSessionInfo();
         },
         onNotice: (msg) => this.post({ type: 'notice', text: msg }),
-      }, this.abort.signal);
+        onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
+      }, this.abort.signal, minimize);
 
       this.post({ type: 'turnDone', stopReason: result.stopReason });
       this.postSessionInfo();
-      this.warnIfContextLarge(session.lastInputTokens);
+      if (this.autoCompact()) {
+        await this.compactIfNeeded(client, session);
+      } else {
+        this.warnIfContextLarge(session.lastInputTokens);
+      }
     } catch (e: any) {
       if (e?.message === 'cancelled' || e?.name === 'AbortError') {
         this.post({ type: 'notice', text: 'Cancelled.' });
@@ -217,6 +295,7 @@ export class Controller {
       if (c.task === 'new' && session.turns > 0) {
         const fresh = this.sessions.reset(this.ladder()[0], EFFORT_BY_COMPLEXITY[c.complexity]);
         fresh.taskSummary = c.summary;
+        await this.planIfNeeded(client, fresh, c.complexity, text);
         this.post({
           type: 'taskSwitch',
           text: `New task detected — fresh session started (${displayName(fresh.model)}, effort ${fresh.effort}). Previous session archived.`,
@@ -226,12 +305,46 @@ export class Controller {
       if (session.turns === 0) {
         session.taskSummary = c.summary;
         session.effort = EFFORT_BY_COMPLEXITY[c.complexity];
+        await this.planIfNeeded(client, session, c.complexity, text);
       }
       return session;
     } catch (e: any) {
       // Classifier failure must never block the user; log and fall through.
       this.log.appendLine(`[classifier error] ${e?.message ?? e}`);
       return session;
+    }
+  }
+
+  /**
+   * For non-trivial tasks, get a short plan from the reasoning tier (Opus for
+   * standard, Fable for hard) before Sonnet touches a single tool. The plan
+   * rides into the session's first message; Sonnet then implements it at
+   * low/high effort with thinking off (see supportsAdaptiveThinking) —
+   * cheap, mechanical execution instead of a second round of expensive
+   * output-token-heavy reasoning.
+   */
+  private async planIfNeeded(client: Anthropic, session: Session, complexity: Complexity, text: string): Promise<void> {
+    if (complexity === 'trivial' || !this.planningEnabled()) {
+      return;
+    }
+    const ladder = this.planningModelLadder();
+    const model = complexity === 'hard' ? ladder[1] ?? ladder[0] : ladder[0];
+    if (!model) {
+      return;
+    }
+    try {
+      const { plan, usage } = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens());
+      const totals = emptyTotals();
+      addUsage(totals, usage);
+      this.plannerCost += costUsd(totals, model);
+      this.plannerRequests += 1;
+      if (plan) {
+        session.plan = plan;
+        this.post({ type: 'notice', text: `Plan drafted by ${displayName(model)} (${formatUsd(costUsd(totals, model))}).` });
+      }
+    } catch (e: any) {
+      // A missed plan must never block the user — Sonnet just implements without one.
+      this.log.appendLine(`[planner error] ${e?.message ?? e}`);
     }
   }
 
@@ -292,42 +405,75 @@ export class Controller {
       `Current session (#${s.id}, ${displayName(s.model)}, effort ${s.effort}): ${formatUsd(s.cost)}`,
       `  input ${s.totals.inputTokens.toLocaleString()} | output ${s.totals.outputTokens.toLocaleString()} | cache read ${s.totals.cacheReadTokens.toLocaleString()} | cache write ${s.totals.cacheWriteTokens.toLocaleString()}`,
       `  cache hit rate: ${cacheHitRate(s.totals)}`,
-      `Task classifier (Haiku): ${formatUsd(classifierCost)}`,
-      `All sessions this window: ${formatUsd(this.grandTotal())} across ${this.sessions.totalRequests + this.classifierTotals.requests} requests`,
+      `Haiku utility calls (classify + compress + compact): ${formatUsd(classifierCost)}`,
+      `Planning calls (Opus/Fable): ${formatUsd(this.plannerCost)} across ${this.plannerRequests} calls`,
+      `All sessions this window: ${formatUsd(this.grandTotal())} across ${this.sessions.totalRequests + this.classifierTotals.requests + this.plannerRequests} requests`,
       '',
       'Per-request detail is in Output → "Claude Coder".',
     ];
     vscode.window.showInformationMessage(lines.join('\n'), { modal: true });
   }
 
+  async showMemory(): Promise<void> {
+    const memory = await this.ensureMemory();
+    const changes = memory.recentChanges(20);
+    const lines =
+      changes.length === 0
+        ? ['No recorded changes yet.']
+        : changes.map(
+            (c) => `${new Date(c.timestamp).toLocaleString()}  ${c.tool}  ${c.path}  (${c.taskSummary || 'unknown task'})`
+          );
+    vscode.window.showInformationMessage(lines.join('\n'), { modal: true });
+  }
+
   // ---------- helpers ----------
 
   private grandTotal(): number {
-    return this.sessions.totalCost + costUsd(this.classifierTotals, CLASSIFIER_MODEL);
+    return this.sessions.totalCost + costUsd(this.classifierTotals, CLASSIFIER_MODEL) + this.plannerCost;
   }
 
-  private buildFirstMessagePreamble(carryOver: string | undefined): string {
+  private buildFirstMessagePreamble(
+    carryOver: string | undefined,
+    memory: MemoryStore,
+    plan: string | undefined
+  ): string {
     const root = this.workspaceRoot();
     const openFiles = vscode.window.tabGroups.all
       .flatMap((g) => g.tabs)
       .map((t) => (t.input instanceof vscode.TabInputText ? vscode.workspace.asRelativePath(t.input.uri) : null))
       .filter(Boolean)
       .slice(0, 15);
+    const digest = memory.projectDigest();
     const parts = [
       `<context>`,
       `Workspace root: ${root}`,
       openFiles.length ? `Open editor tabs: ${openFiles.join(', ')}` : '',
       `</context>`,
-      carryOver ? `<previous-attempt>\n${carryOver}\n</previous-attempt>` : '',
+      digest ? `<memory>\n${digest}\n</memory>` : '',
+      plan ? `<plan>\n${plan}\n</plan>\nImplement the plan above. Don't re-derive it — follow it.` : '',
+      carryOver ? `<summary-so-far>\n${carryOver}\n</summary-so-far>` : '',
       '',
     ];
     return parts.filter(Boolean).join('\n') + '\n';
   }
 
-  private buildToolContext(): ToolContext {
+  /** Lazily opens (or creates) the per-workspace local memory file. */
+  private async ensureMemory(): Promise<MemoryStore> {
+    if (!this.memory) {
+      const dir = this.context.storageUri?.fsPath ?? path.join(this.workspaceRoot(), '.claudeCoder');
+      this.memory = await MemoryStore.load(path.join(dir, 'memory.json'));
+    }
+    return this.memory;
+  }
+
+  private buildToolContext(session: Session, memory: MemoryStore): ToolContext {
     return {
       workspaceRoot: this.workspaceRoot(),
       requestPermission: (req) => this.requestPermission(req),
+      memory,
+      taskId: String(session.id),
+      taskSummary: session.taskSummary,
+      readCache: session.readCache,
     };
   }
 
@@ -346,6 +492,49 @@ export class Controller {
         type: 'notice',
         text: `Context is now ~${Math.round(inputTokens / 1000)}k tokens. Consider "New Task" to reset — long sessions get expensive.`,
       });
+    }
+  }
+
+  /**
+   * Local stand-in for server-side compaction: once a session's input passes
+   * `compactionThresholdTokens`, collapse its transcript into one Haiku-
+   * written summary and keep going on the SAME session (same model/effort/
+   * cost totals) instead of just nagging the user to reset by hand. This
+   * necessarily breaks the prompt cache for one turn (new content), but
+   * every turn after that is cheap again instead of resending a huge history.
+   */
+  private async compactIfNeeded(client: Anthropic, session: Session): Promise<void> {
+    const threshold = this.config().get<number>('compactionThresholdTokens') ?? 100000;
+    if (session.lastInputTokens <= threshold || session.messages.length === 0) {
+      return;
+    }
+    try {
+      const before = session.lastInputTokens;
+      const { summary, usage } = await compactTranscript(
+        client,
+        CLASSIFIER_MODEL,
+        session.messages,
+        this.compactionMaxTokens()
+      );
+      addUsage(this.classifierTotals, usage);
+      if (!summary) {
+        return;
+      }
+      session.messages = [];
+      session.carryOver = summary;
+      session.lastInputTokens = 0;
+      // The transcript is gone, so "already read earlier in this session"
+      // no longer holds — force fresh reads after compaction.
+      session.readCache.clear();
+      this.post({
+        type: 'notice',
+        text: `Context compacted (was ~${Math.round(before / 1000)}k tokens) — summary carried forward, transcript reset to save cost.`,
+      });
+      this.postSessionInfo();
+    } catch (e: any) {
+      // Compaction failure must never block the user; fall back to the warning.
+      this.log.appendLine(`[compact error] ${e?.message ?? e}`);
+      this.warnIfContextLarge(session.lastInputTokens);
     }
   }
 

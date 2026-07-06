@@ -51,6 +51,10 @@
         "title": "Claude Coder: Show Session Costs"
       },
       {
+        "command": "claudeCoder.showMemory",
+        "title": "Claude Coder: Show Project Memory (recent changes)"
+      },
+      {
         "command": "claudeCoder.resetPermissions",
         "title": "Claude Coder: Reset \"Always Allow\" Permissions"
       }
@@ -75,10 +79,56 @@
           "default": true,
           "description": "Use a cheap Haiku call to detect task changes and auto-reset the session."
         },
+        "claudeCoder.planningEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Draft a short plan on the reasoning tier (Opus/Fable) before Sonnet implements it, for standard/hard tasks."
+        },
+        "claudeCoder.planningModelLadder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude-opus-4-8",
+            "claude-fable-5"
+          ],
+          "description": "Planning model by complexity: index 0 for standard tasks, index 1 for hard tasks."
+        },
+        "claudeCoder.planningMaxTokens": {
+          "type": "number",
+          "default": 1024,
+          "description": "Hard cap on the planning call's output tokens (the reasoning tier is the most expensive per token)."
+        },
+        "claudeCoder.compressLongPrompts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Haiku to shrink long, prose-heavy prompts (pasted logs/specs) before sending them to the main model. Off by default: it rewrites your own wording."
+        },
+        "claudeCoder.compressionThresholdChars": {
+          "type": "number",
+          "default": 4000,
+          "description": "Only compress prompts longer than this (characters)."
+        },
+        "claudeCoder.autoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a session's context passes compactionThresholdTokens, use Haiku to summarize the transcript and keep going instead of just warning."
+        },
+        "claudeCoder.compactionMaxTokens": {
+          "type": "number",
+          "default": 800,
+          "description": "Output cap on the auto-compaction summary."
+        },
         "claudeCoder.autoApproveCommands": {
           "type": "boolean",
           "default": false,
           "description": "Run shell commands without asking for confirmation (risky)."
+        },
+        "claudeCoder.minimizeOutputTokens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Produce as few output tokens as possible: effort is clamped to 'low', extended thinking is disabled, and the model is instructed to work silently with terse edits and a one-sentence final answer. Output tokens cost 5x input."
         },
         "claudeCoder.maxTokens": {
           "type": "number",

@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import type Anthropic from '@anthropic-ai/sdk';
+import { MemoryStore } from './memory';
 
 const MAX_READ_LINES = 1500;
 const MAX_LINE_LEN = 500;
@@ -120,6 +122,16 @@ export interface ToolContext {
   workspaceRoot: string;
   /** Ask the user (in the chat panel). Resolves true if allowed. */
   requestPermission: (req: PermissionRequest) => Promise<boolean>;
+  /** Persistent per-project cache of read hashes + edit history. */
+  memory: MemoryStore;
+  taskId: string;
+  taskSummary: string;
+  /** Whole-file hashes already sent in this session's transcript (in-memory, per Session). */
+  readCache: Map<string, string>;
+}
+
+function fileHash(content: string): string {
+  return crypto.createHash('sha1').update(content).digest('hex').slice(0, 12);
 }
 
 const DENIED = 'The user denied permission for this action. Ask them how to proceed or take another approach.';
@@ -141,7 +153,7 @@ function preview(s: string, max = 160): string {
 }
 
 async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
-  const { abs, outside } = resolvePath(ctx.workspaceRoot, input.path);
+  const { abs, outside, display } = resolvePath(ctx.workspaceRoot, input.path);
   if (outside) {
     const ok = await ctx.requestPermission({
       kind: 'outside-read',
@@ -154,6 +166,16 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
     }
   }
   const raw = await fs.readFile(abs, 'utf8');
+  const hash = fileHash(raw);
+  ctx.memory.noteRead(display, hash);
+
+  // Whole-file reads already sent verbatim earlier in this session don't
+  // need to be resent — the model still has them in its own transcript.
+  const wholeFile = !input.offset && !input.limit;
+  if (wholeFile && ctx.readCache.get(display) === hash) {
+    return `${display}: unchanged since it was read in full earlier in this session (hash ${hash}) — reuse that content, no need to re-read.`;
+  }
+
   const lines = raw.split('\n');
   const offset = Math.max(1, Number(input.offset) || 1);
   const limit = Math.min(Number(input.limit) || MAX_READ_LINES, MAX_READ_LINES);
@@ -165,7 +187,11 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
     offset - 1 + limit < lines.length
       ? `\n[showing lines ${offset}-${offset + slice.length - 1} of ${lines.length}]`
       : '';
-  return truncate(numbered + footer);
+  const result = truncate(numbered + footer);
+  if (wholeFile) {
+    ctx.readCache.set(display, hash);
+  }
+  return result;
 }
 
 async function writeFileTool(ctx: ToolContext, input: any): Promise<string> {
@@ -187,8 +213,23 @@ async function writeFileTool(ctx: ToolContext, input: any): Promise<string> {
   if (!ok) {
     throw new Error(DENIED);
   }
+  let before = '(new file)';
+  try {
+    before = preview(await fs.readFile(abs, 'utf8'), 300);
+  } catch {
+    // file didn't exist yet
+  }
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, content, 'utf8');
+  ctx.memory.noteChange({
+    taskId: ctx.taskId,
+    taskSummary: ctx.taskSummary,
+    path: display,
+    tool: 'write_file',
+    before,
+    after: preview(content, 300),
+  });
+  ctx.readCache.set(display, fileHash(content));
   return `Wrote ${display} (${content.length} chars)`;
 }
 
@@ -229,6 +270,15 @@ async function editFileTool(ctx: ToolContext, input: any): Promise<string> {
     updated = raw.replace(oldStr, newStr);
   }
   await fs.writeFile(abs, updated, 'utf8');
+  ctx.memory.noteChange({
+    taskId: ctx.taskId,
+    taskSummary: ctx.taskSummary,
+    path: display,
+    tool: 'edit_file',
+    before: preview(oldStr, 300),
+    after: preview(newStr, 300),
+  });
+  ctx.readCache.set(display, fileHash(updated));
   return `Edited ${display}`;
 }
 

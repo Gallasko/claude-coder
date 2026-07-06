@@ -143,6 +143,31 @@ body {
   color: var(--vscode-errorForeground);
 }
 
+.msg.working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  padding: 4px 8px;
+}
+
+.spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--vscode-descriptionForeground);
+  border-top-color: transparent;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: cc-spin 0.9s linear infinite;
+}
+
+@keyframes cc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .msg.switch {
   font-size: 0.85em;
   text-align: center;

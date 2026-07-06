@@ -15,6 +15,36 @@
 
   /** The assistant bubble currently being streamed into, if any. */
   let streamEl = null;
+  /** The ephemeral "working…" indicator shown while a turn runs. */
+  let workingEl = null;
+
+  function fmtTok(n) {
+    return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+  }
+
+  function updateWorking(phase, tokens) {
+    if (!workingEl) {
+      workingEl = document.createElement('div');
+      workingEl.className = 'msg working';
+      const spin = document.createElement('span');
+      spin.className = 'spinner';
+      const label = document.createElement('span');
+      label.className = 'working-label';
+      workingEl.appendChild(spin);
+      workingEl.appendChild(label);
+    }
+    workingEl.querySelector('.working-label').textContent =
+      phase + ' · ~' + fmtTok(tokens) + ' tok';
+    messagesEl.appendChild(workingEl); // keep it pinned at the bottom
+    scrollDown();
+  }
+
+  function clearWorking() {
+    if (workingEl) {
+      workingEl.remove();
+      workingEl = null;
+    }
+  }
 
   const SLASH_COMMANDS = [
     { name: 'new', desc: 'Start a new task (reset session)' },
@@ -189,7 +219,13 @@
           streamEl = addMsg('assistant', '');
         }
         streamEl.textContent += msg.text;
+        if (workingEl) {
+          messagesEl.appendChild(workingEl); // stay below the streaming text
+        }
         scrollDown();
+        break;
+      case 'working':
+        updateWorking(msg.phase, msg.tokens);
         break;
       case 'toolUse':
         streamEl = null;
@@ -257,6 +293,7 @@
         addMsg('notice', msg.text);
         break;
       case 'error':
+        clearWorking();
         addMsg('notice error', msg.text);
         setBusy(false);
         break;
@@ -265,6 +302,7 @@
         addMsg('switch', msg.text);
         break;
       case 'turnDone':
+        clearWorking();
         streamEl = null;
         setBusy(false);
         break;
