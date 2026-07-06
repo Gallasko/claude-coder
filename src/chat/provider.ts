@@ -38,6 +38,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'showCosts':
           this.controller.showCosts();
           break;
+        case 'showUsageHistory':
+          await this.controller.showUsageHistory();
+          break;
         case 'resetPermissions':
           await this.controller.resetPermissions();
           break;

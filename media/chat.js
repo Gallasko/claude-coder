@@ -50,6 +50,7 @@
     { name: 'new', desc: 'Start a new task (reset session)' },
     { name: 'escalate', desc: 'Restart task on the next bigger model' },
     { name: 'costs', desc: 'Show session cost breakdown' },
+    { name: 'usage', desc: 'Show usage history & billing tracker' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
     { name: 'help', desc: 'List available commands' },
   ];
@@ -120,6 +121,9 @@
         break;
       case 'costs':
         vscode.postMessage({ type: 'showCosts' });
+        break;
+      case 'usage':
+        vscode.postMessage({ type: 'showUsageHistory' });
         break;
       case 'reset-permissions':
         vscode.postMessage({ type: 'resetPermissions' });

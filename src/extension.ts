@@ -15,6 +15,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCoder.setApiKey', () => controller.setApiKey()),
     vscode.commands.registerCommand('claudeCoder.escalate', () => controller.escalate()),
     vscode.commands.registerCommand('claudeCoder.showCosts', () => controller.showCosts()),
+    vscode.commands.registerCommand('claudeCoder.showUsageHistory', () => controller.showUsageHistory()),
     vscode.commands.registerCommand('claudeCoder.showMemory', () => controller.showMemory()),
     vscode.commands.registerCommand('claudeCoder.resetPermissions', () => controller.resetPermissions())
   );

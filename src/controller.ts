@@ -10,6 +10,8 @@ import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
 import { MemoryStore } from './agent/memory';
 import { runSubscriptionTurn, SubscriptionTurnResult } from './agent/sdkBackend';
+import { UsageStore, UsageRecord } from './agent/usageStore';
+import { UsagePanel } from './usage/panel';
 import {
   CLASSIFIER_MODEL,
   Complexity,
@@ -53,6 +55,9 @@ export class Controller {
   private permissionId = 0;
   private alwaysAllowed: Set<string>;
   private memory: MemoryStore | undefined;
+  /** Persistent, cross-workspace usage/billing history — see usageStore.ts. */
+  private usageStore: UsageStore | undefined;
+  private readonly usageStoreReady: Promise<UsageStore>;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -63,6 +68,38 @@ export class Controller {
     this.statusBar.command = 'claudeCoder.showCosts';
     this.updateStatusBar();
     this.statusBar.show();
+    this.usageStoreReady = this.initUsageStore();
+  }
+
+  private async initUsageStore(): Promise<UsageStore> {
+    const dir = this.context.globalStorageUri.fsPath;
+    const store = await UsageStore.load(path.join(dir, 'usage-history.json'));
+    this.usageStore = store;
+    return store;
+  }
+
+  /** Best-effort: a disk hiccup here must never interrupt an in-flight turn. */
+  private recordUsage(entry: Omit<UsageRecord, 'timestamp'>): void {
+    this.usageStore?.record(entry);
+  }
+
+  private snapshotTotals(t: UsageTotals): UsageTotals {
+    return { ...t };
+  }
+
+  private deltaTotals(before: UsageTotals, after: UsageTotals): UsageTotals {
+    return {
+      inputTokens: after.inputTokens - before.inputTokens,
+      outputTokens: after.outputTokens - before.outputTokens,
+      cacheReadTokens: after.cacheReadTokens - before.cacheReadTokens,
+      cacheWriteTokens: after.cacheWriteTokens - before.cacheWriteTokens,
+      requests: after.requests - before.requests,
+    };
+  }
+
+  async showUsageHistory(): Promise<void> {
+    const store = await this.usageStoreReady;
+    UsagePanel.show(store);
   }
 
   attachUi(ui: UiSink): void {
@@ -213,6 +250,7 @@ export class Controller {
       // the user's own words, so it's off by default.
       if (this.compressLongPrompts() && text.length > this.compressionThresholdChars()) {
         try {
+          const before = this.snapshotTotals(this.classifierTotals);
           const { text: compressed, usage } = await compressPrompt(
             client,
             CLASSIFIER_MODEL,
@@ -220,6 +258,18 @@ export class Controller {
             Math.min(2000, Math.ceil(this.compressionThresholdChars() / 2))
           );
           addUsage(this.classifierTotals, usage);
+          const delta = this.deltaTotals(before, this.classifierTotals);
+          this.recordUsage({
+            model: CLASSIFIER_MODEL,
+            backend: 'credits',
+            kind: 'compress',
+            sessionId: this.sessions.current.id,
+            inputTokens: delta.inputTokens,
+            outputTokens: delta.outputTokens,
+            cacheReadTokens: delta.cacheReadTokens,
+            cacheWriteTokens: delta.cacheWriteTokens,
+            costUsd: costUsd(delta, CLASSIFIER_MODEL),
+          });
           if (compressed && compressed.length < text.length * 0.9) {
             this.post({ type: 'notice', text: `Compressed a long prompt (${text.length} → ${compressed.length} chars) before sending.` });
             text = compressed;
@@ -298,6 +348,19 @@ export class Controller {
               `cacheRead=${usage.cache_read_input_tokens ?? 0} cacheWrite=${usage.cache_creation_input_tokens ?? 0} ` +
               `sessionCost=${formatUsd(session.cost)} total=${formatUsd(this.grandTotal())}`
           );
+          const totals = emptyTotals();
+          addUsage(totals, usage);
+          this.recordUsage({
+            model: session.model,
+            backend: 'credits',
+            kind: 'turn',
+            sessionId: session.id,
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            cacheReadTokens: totals.cacheReadTokens,
+            cacheWriteTokens: totals.cacheWriteTokens,
+            costUsd: costUsd(totals, session.model),
+          });
           this.updateStatusBar();
           this.postSessionInfo();
         },
@@ -368,6 +431,17 @@ export class Controller {
     this.subTotals.cacheWriteTokens += result.usage.cacheWriteTokens;
     this.subTotals.requests += 1;
     this.subValueUsd += result.estValueUsd;
+    this.recordUsage({
+      model: this.subscriptionModel(),
+      backend: 'subscription',
+      kind: 'subscription',
+      sessionId: session.id,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cacheReadTokens: result.usage.cacheReadTokens,
+      cacheWriteTokens: result.usage.cacheWriteTokens,
+      costUsd: result.estValueUsd,
+    });
     this.log.appendLine(
       `[sub] session=#${session.id} sdk=${result.sdkSessionId ?? '?'} turns=${result.numTurns} ` +
         `in=${result.usage.inputTokens} out=${result.usage.outputTokens} ` +
@@ -403,7 +477,20 @@ export class Controller {
     }
 
     try {
+      const before = this.snapshotTotals(this.classifierTotals);
       const c = await classifyPrompt(client, session.taskSummary, text, this.classifierTotals);
+      const delta = this.deltaTotals(before, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'classify',
+        sessionId: session.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
       if (c.task === 'new' && session.turns > 0) {
         const backend = this.defaultBackend();
         const fresh = this.sessions.reset(
@@ -413,11 +500,15 @@ export class Controller {
           backend
         );
         fresh.taskSummary = c.summary;
-        await this.planIfNeeded(client, fresh, c.complexity, text);
+        // Post the switch the instant the model changes — planning (Opus/Fable)
+        // can take several seconds and must not delay this from showing live.
         this.post({
           type: 'taskSwitch',
           text: `New task detected — fresh session started (${this.backendLabel(fresh)}, effort ${fresh.effort}). Previous session archived.`,
         });
+        this.postSessionInfo();
+        this.updateStatusBar();
+        await this.planIfNeeded(client, fresh, c.complexity, text);
         return fresh;
       }
       if (session.turns === 0) {
@@ -456,9 +547,23 @@ export class Controller {
       addUsage(totals, usage);
       this.plannerCost += costUsd(totals, model);
       this.plannerRequests += 1;
+      this.recordUsage({
+        model,
+        backend: 'credits',
+        kind: 'plan',
+        sessionId: session.id,
+        inputTokens: totals.inputTokens,
+        outputTokens: totals.outputTokens,
+        cacheReadTokens: totals.cacheReadTokens,
+        cacheWriteTokens: totals.cacheWriteTokens,
+        costUsd: costUsd(totals, model),
+      });
       if (plan) {
         session.plan = plan;
-        this.post({ type: 'notice', text: `Plan drafted by ${displayName(model)} (${formatUsd(costUsd(totals, model))}).` });
+        this.post({
+          type: 'notice',
+          text: `Plan drafted by ${displayName(model)} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
+        });
       }
     } catch (e: any) {
       // A missed plan must never block the user — Sonnet just implements without one.
@@ -638,6 +743,7 @@ export class Controller {
     }
     try {
       const before = session.lastInputTokens;
+      const beforeTotals = this.snapshotTotals(this.classifierTotals);
       const { summary, usage } = await compactTranscript(
         client,
         CLASSIFIER_MODEL,
@@ -645,6 +751,18 @@ export class Controller {
         this.compactionMaxTokens()
       );
       addUsage(this.classifierTotals, usage);
+      const delta = this.deltaTotals(beforeTotals, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'compact',
+        sessionId: session.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
       if (!summary) {
         return;
       }
@@ -704,6 +822,17 @@ export class Controller {
     this.statusBar.dispose();
     this.log.dispose();
   }
+}
+
+/** Terse preview of a drafted plan: first couple of bullets, capped in length. */
+function summarizePlan(plan: string, maxLines = 3, maxChars = 220): string {
+  const lines = plan
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, maxLines);
+  const summary = lines.join('\n');
+  return summary.length > maxChars ? summary.slice(0, maxChars).trimEnd() + '…' : summary;
 }
 
 function cacheHitRate(t: { inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): string {

@@ -51,6 +51,10 @@
         "title": "Claude Coder: Show Session Costs"
       },
       {
+        "command": "claudeCoder.showUsageHistory",
+        "title": "Claude Coder: Show Usage History & Billing"
+      },
+      {
         "command": "claudeCoder.showMemory",
         "title": "Claude Coder: Show Project Memory (recent changes)"
       },
