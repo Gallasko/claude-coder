@@ -1,0 +1,110 @@
+{
+  "name": "claude-coder",
+  "displayName": "Claude Coder",
+  "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
+  "version": "0.1.0",
+  "publisher": "corse",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeCoder",
+          "title": "Claude Coder",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeCoder": [
+        {
+          "type": "webview",
+          "id": "claudeCoder.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeCoder.newTask",
+        "title": "Claude Coder: New Task (reset session)"
+      },
+      {
+        "command": "claudeCoder.setApiKey",
+        "title": "Claude Coder: Set API Key"
+      },
+      {
+        "command": "claudeCoder.escalate",
+        "title": "Claude Coder: Escalate Task to Bigger Model"
+      },
+      {
+        "command": "claudeCoder.showCosts",
+        "title": "Claude Coder: Show Session Costs"
+      },
+      {
+        "command": "claudeCoder.resetPermissions",
+        "title": "Claude Coder: Reset \"Always Allow\" Permissions"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Coder",
+      "properties": {
+        "claudeCoder.modelLadder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-fable-5"
+          ],
+          "description": "Escalation ladder, cheapest first. Escalation restarts the task on the next model."
+        },
+        "claudeCoder.autoTaskDetection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use a cheap Haiku call to detect task changes and auto-reset the session."
+        },
+        "claudeCoder.autoApproveCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run shell commands without asking for confirmation (risky)."
+        },
+        "claudeCoder.maxTokens": {
+          "type": "number",
+          "default": 32000,
+          "description": "max_tokens per response (streaming)."
+        },
+        "claudeCoder.compactionThresholdTokens": {
+          "type": "number",
+          "default": 100000,
+          "description": "When a request's input exceeds this, suggest starting a new session."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}
