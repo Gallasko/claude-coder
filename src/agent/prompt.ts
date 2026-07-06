@@ -29,6 +29,18 @@ export const SYSTEM_PROMPT = `You are Claude Coder, a coding agent running insid
 - If blocked or asked a question, answer in the fewest words that are still precise.`;
 
 /**
+ * Appended to the Claude Code preset system prompt on the subscription
+ * (Agent SDK) path. The preset already covers tool usage; this only carries
+ * our strict communication rules. FROZEN, like everything cache-relevant.
+ */
+export const SUBSCRIPTION_SYSTEM_APPEND = `
+# Communication — strict
+- No preamble, no pleasantries, no praise, no emoji, no restating the request.
+- Between tool calls, stay silent unless a finding changes the plan — then one short sentence.
+- Final message: at most 2 short sentences — what changed and how it was verified. No headers, no bullet-point recaps, no "let me know if...", no offers of next steps.
+- Never paste file contents or diffs back to the user; reference path:line instead.`;
+
+/**
  * Appended to the system prompt when claudeCoder.minimizeOutputTokens is on.
  * Also FROZEN — byte-identical across requests — so the cache prefix holds
  * for as long as the setting stays unchanged.

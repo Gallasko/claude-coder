@@ -22,10 +22,17 @@ export class Session {
   lastInputTokens = 0;
   /** Whole-file hashes already sent verbatim in this session's transcript. */
   readCache: Map<string, string> = new Map();
+  /** Agent SDK session id (subscription backend) — lets follow-ups resume with context. */
+  sdkSessionId: string | undefined;
+  /** Final assistant texts (subscription backend keeps no local transcript). */
+  assistantLog: string[] = [];
+  /** User prompts handled in this session, regardless of backend. */
+  promptCount = 0;
 
   constructor(
     public model: string,
-    public effort: 'low' | 'medium' | 'high' | 'xhigh' = 'high'
+    public effort: 'low' | 'medium' | 'high' | 'xhigh' = 'high',
+    public backend: 'subscription' | 'credits' = 'credits'
   ) {}
 
   get cost(): number {
@@ -33,7 +40,9 @@ export class Session {
   }
 
   get turns(): number {
-    return this.messages.filter((m) => m.role === 'user').length;
+    // The subscription backend keeps its transcript inside the Agent SDK, so
+    // count prompts we handled rather than local messages.
+    return this.backend === 'subscription' ? this.promptCount : this.messages.filter((m) => m.role === 'user').length;
   }
 }
 
@@ -56,10 +65,15 @@ export class SessionManager {
   }
 
   /** Archive the current session and start a fresh one. */
-  reset(model: string, effort?: Session['effort'], carryOver?: string): Session {
+  reset(
+    model: string,
+    effort?: Session['effort'],
+    carryOver?: string,
+    backend: Session['backend'] = 'credits'
+  ): Session {
     this.archivedCost += this.current.cost;
     this.archivedRequests += this.current.totals.requests;
-    this.current = new Session(model, effort ?? 'high');
+    this.current = new Session(model, effort ?? 'high', backend);
     this.current.carryOver = carryOver;
     return this.current;
   }
@@ -70,10 +84,18 @@ export class SessionManager {
    */
   buildEscalationCarryOver(): string {
     const s = this.current;
-    const firstUser = s.messages.find((m) => m.role === 'user');
-    const firstText = extractText(firstUser).slice(0, 1500);
-    const lastAssistant = [...s.messages].reverse().find((m) => m.role === 'assistant');
-    const lastText = extractText(lastAssistant).slice(0, 2000);
+    let firstText: string;
+    let lastText: string;
+    if (s.backend === 'subscription') {
+      // No local transcript — use the captured final texts instead.
+      firstText = '';
+      lastText = s.assistantLog.slice(-2).join('\n\n').slice(0, 2000);
+    } else {
+      const firstUser = s.messages.find((m) => m.role === 'user');
+      firstText = extractText(firstUser).slice(0, 1500);
+      const lastAssistant = [...s.messages].reverse().find((m) => m.role === 'assistant');
+      lastText = extractText(lastAssistant).slice(0, 2000);
+    }
     return [
       `You are taking over a task from a previous attempt that did not succeed.`,
       s.taskSummary ? `Task: ${s.taskSummary}` : '',

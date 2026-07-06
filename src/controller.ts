@@ -9,6 +9,7 @@ import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
 import { MemoryStore } from './agent/memory';
+import { runSubscriptionTurn, SubscriptionTurnResult } from './agent/sdkBackend';
 import {
   CLASSIFIER_MODEL,
   Complexity,
@@ -38,6 +39,10 @@ export class Controller {
    *  because the planning model (Opus vs Fable) can differ call to call. */
   private plannerCost = 0;
   private plannerRequests = 0;
+  /** Subscription (Agent SDK) usage — informational: billed to the user's
+   *  Pro/Max plan, not to API credits. estValue is API-equivalent USD. */
+  private subTotals: UsageTotals = emptyTotals();
+  private subValueUsd = 0;
   private abort: AbortController | undefined;
   private ui: UiSink | undefined;
   private statusBar: vscode.StatusBarItem;
@@ -51,6 +56,7 @@ export class Controller {
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
+    this.sessions.current.backend = this.defaultBackend();
     this.alwaysAllowed = new Set(context.workspaceState.get<string[]>(ALLOWED_STORE_KEY, []));
     this.log = vscode.window.createOutputChannel('Claude Coder');
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -102,6 +108,18 @@ export class Controller {
 
   private minimizeOutputTokens(): boolean {
     return this.config().get<boolean>('minimizeOutputTokens') ?? false;
+  }
+
+  private useSubscription(): boolean {
+    return this.config().get<boolean>('useSubscription') ?? true;
+  }
+
+  private subscriptionModel(): string {
+    return this.config().get<string>('subscriptionModel') ?? 'sonnet';
+  }
+
+  private defaultBackend(): Session['backend'] {
+    return this.useSubscription() ? 'subscription' : 'credits';
   }
 
   private post(message: Record<string, unknown>): void {
@@ -214,20 +232,59 @@ export class Controller {
       const session = await this.routePrompt(client, text);
 
       // First message of a session carries the dynamic context the frozen
-      // system prompt must not contain (cache discipline).
+      // system prompt must not contain (cache discipline). The plan drafted
+      // on the credits reasoning tier feeds forward here — into either backend.
+      const isFirst =
+        session.backend === 'subscription' ? session.promptCount === 0 : session.messages.length === 0;
+      session.promptCount += 1;
       let content = text;
-      if (session.messages.length === 0) {
+      if (isFirst) {
         content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan) + text;
       }
 
-      const toolCtx = this.buildToolContext(session, memory);
-      const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
       const minimize = this.minimizeOutputTokens();
       if (minimize) {
         // Effort drives how much the model reasons/writes — clamp it to the
         // floor everywhere (including escalations) when minimizing output.
         session.effort = 'low';
       }
+
+      // ---- subscription backend (Agent SDK, billed to the user's plan) ----
+      if (session.backend === 'subscription') {
+        try {
+          const result = await this.runSubscription(session, content, minimize);
+          this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
+          this.postSessionInfo();
+          if (result.isError) {
+            this.post({
+              type: 'notice',
+              text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
+            });
+            void this.offerEscalation(
+              `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
+            );
+          }
+          return;
+        } catch (e: any) {
+          if (e?.message === 'cancelled' || e?.name === 'AbortError' || this.abort?.signal.aborted) {
+            throw e;
+          }
+          // Typical cause: no Claude Code login for the subscription. Fall
+          // back to credits for this task instead of failing the prompt.
+          this.log.appendLine(`[sub error] ${e?.stack ?? e}`);
+          this.post({
+            type: 'notice',
+            text:
+              'Subscription backend unavailable — falling back to API credits for this task. ' +
+              'To use your Pro/Max plan, install Claude Code and log in (`claude` → /login), then start a new task.',
+          });
+          session.backend = 'credits';
+        }
+      }
+
+      // ---- credits backend (direct API) ----
+      const toolCtx = this.buildToolContext(session, memory);
+      const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
 
       const result = await runTurn(client, session, content, toolCtx, maxTokens, {
         onText: (delta) => this.post({ type: 'delta', text: delta }),
@@ -280,6 +337,61 @@ export class Controller {
     this.abort?.abort();
   }
 
+  // ---------- subscription backend ----------
+
+  private async runSubscription(
+    session: Session,
+    prompt: string,
+    minimize: boolean
+  ): Promise<SubscriptionTurnResult> {
+    const result = await runSubscriptionTurn({
+      prompt,
+      workspaceRoot: this.workspaceRoot(),
+      model: this.subscriptionModel(),
+      resumeSessionId: session.sdkSessionId,
+      minimizeOutput: minimize,
+      maxTurns: 50,
+      abort: this.abort!,
+      requestPermission: (req) => this.requestPermission(req),
+      onText: (delta) => this.post({ type: 'delta', text: delta }),
+      onToolUse: (name, detail) => this.post({ type: 'toolUse', name, detail }),
+      onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
+      onNotice: (msg) => this.post({ type: 'notice', text: msg }),
+    });
+    session.sdkSessionId = result.sdkSessionId ?? session.sdkSessionId;
+    if (result.finalText) {
+      session.assistantLog.push(result.finalText);
+    }
+    this.subTotals.inputTokens += result.usage.inputTokens;
+    this.subTotals.outputTokens += result.usage.outputTokens;
+    this.subTotals.cacheReadTokens += result.usage.cacheReadTokens;
+    this.subTotals.cacheWriteTokens += result.usage.cacheWriteTokens;
+    this.subTotals.requests += 1;
+    this.subValueUsd += result.estValueUsd;
+    this.log.appendLine(
+      `[sub] session=#${session.id} sdk=${result.sdkSessionId ?? '?'} turns=${result.numTurns} ` +
+        `in=${result.usage.inputTokens} out=${result.usage.outputTokens} ` +
+        `cacheRead=${result.usage.cacheReadTokens} estValue=${formatUsd(result.estValueUsd)} ` +
+        `subTotalEst=${formatUsd(this.subValueUsd)}`
+    );
+    this.updateStatusBar();
+    this.postSessionInfo();
+    return result;
+  }
+
+  /** Chat card asking whether to restart the task on the credits tier. */
+  private async offerEscalation(reason: string): Promise<void> {
+    const ok = await this.requestPermission({
+      kind: 'command',
+      key: `escalate-offer:${++this.permissionId}`,
+      title: 'Escalate to the credits tier?',
+      detail: reason,
+    });
+    if (ok) {
+      await this.escalate();
+    }
+  }
+
   // ---------- routing: task detection + complexity ----------
 
   private async routePrompt(client: Anthropic, text: string) {
@@ -293,12 +405,18 @@ export class Controller {
     try {
       const c = await classifyPrompt(client, session.taskSummary, text, this.classifierTotals);
       if (c.task === 'new' && session.turns > 0) {
-        const fresh = this.sessions.reset(this.ladder()[0], EFFORT_BY_COMPLEXITY[c.complexity]);
+        const backend = this.defaultBackend();
+        const fresh = this.sessions.reset(
+          this.ladder()[0],
+          EFFORT_BY_COMPLEXITY[c.complexity],
+          undefined,
+          backend
+        );
         fresh.taskSummary = c.summary;
         await this.planIfNeeded(client, fresh, c.complexity, text);
         this.post({
           type: 'taskSwitch',
-          text: `New task detected — fresh session started (${displayName(fresh.model)}, effort ${fresh.effort}). Previous session archived.`,
+          text: `New task detected — fresh session started (${this.backendLabel(fresh)}, effort ${fresh.effort}). Previous session archived.`,
         });
         return fresh;
       }
@@ -352,7 +470,7 @@ export class Controller {
 
   newTask(): void {
     this.cancel();
-    this.sessions.reset(this.ladder()[0]);
+    this.sessions.reset(this.ladder()[0], undefined, undefined, this.defaultBackend());
     this.post({ type: 'taskSwitch', text: 'New session started.' });
     this.postSessionInfo();
     this.updateStatusBar();
@@ -360,8 +478,16 @@ export class Controller {
 
   async escalate(): Promise<void> {
     const ladder = this.ladder();
-    const idx = ladder.indexOf(this.sessions.current.model);
-    const next = ladder[idx + 1];
+    let next: string | undefined;
+    if (this.sessions.current.backend === 'subscription') {
+      // The subscription runs on the ladder's base tier — escalating means
+      // moving to the next credits tier (or the base tier on credits if the
+      // ladder has a single entry).
+      next = ladder[1] ?? ladder[0];
+    } else {
+      const idx = ladder.indexOf(this.sessions.current.model);
+      next = ladder[idx + 1];
+    }
     if (!next) {
       this.post({
         type: 'notice',
@@ -385,11 +511,11 @@ export class Controller {
     this.cancel();
     const carryOver = this.sessions.buildEscalationCarryOver();
     const summary = this.sessions.current.taskSummary;
-    const fresh = this.sessions.reset(next, 'xhigh', carryOver);
+    const fresh = this.sessions.reset(next, 'xhigh', carryOver, 'credits');
     fresh.taskSummary = summary;
     this.post({
       type: 'taskSwitch',
-      text: `Escalated to ${displayName(next)} (effort xhigh). The task restarts fresh with a summary of the previous attempt.`,
+      text: `Escalated to ${displayName(next)} on API credits (effort xhigh). The task restarts fresh with a summary of the previous attempt.`,
     });
     this.postSessionInfo();
     this.updateStatusBar();
@@ -407,7 +533,9 @@ export class Controller {
       `  cache hit rate: ${cacheHitRate(s.totals)}`,
       `Haiku utility calls (classify + compress + compact): ${formatUsd(classifierCost)}`,
       `Planning calls (Opus/Fable): ${formatUsd(this.plannerCost)} across ${this.plannerRequests} calls`,
-      `All sessions this window: ${formatUsd(this.grandTotal())} across ${this.sessions.totalRequests + this.classifierTotals.requests + this.plannerRequests} requests`,
+      `Subscription (Pro/Max plan, not billed as credits): ${this.subTotals.requests} runs, est. value ${formatUsd(this.subValueUsd)}`,
+      `  sub tokens: in ${this.subTotals.inputTokens.toLocaleString()} | out ${this.subTotals.outputTokens.toLocaleString()} | cache read ${this.subTotals.cacheReadTokens.toLocaleString()}`,
+      `API credits spent this window: ${formatUsd(this.grandTotal())} across ${this.sessions.totalRequests + this.classifierTotals.requests + this.plannerRequests} requests`,
       '',
       'Per-request detail is in Output → "Claude Coder".',
     ];
@@ -538,14 +666,25 @@ export class Controller {
     }
   }
 
+  private backendLabel(s: Session): string {
+    return s.backend === 'subscription'
+      ? `${this.subscriptionModel()} on your plan`
+      : `${displayName(s.model)} on credits`;
+  }
+
   private postSessionInfo(): void {
     const s = this.sessions.current;
+    const costLine =
+      s.backend === 'subscription'
+        ? `plan ~${formatUsd(this.subValueUsd)} · credits ${formatUsd(this.grandTotal())}`
+        : `${formatUsd(s.cost)} (credits total ${formatUsd(this.grandTotal())})`;
     this.post({
       type: 'sessionInfo',
-      model: displayName(s.model),
+      model: this.backendLabel(s),
       effort: s.effort,
       cost: formatUsd(s.cost),
       totalCost: formatUsd(this.grandTotal()),
+      costLine,
       task: s.taskSummary,
     });
   }
@@ -553,8 +692,11 @@ export class Controller {
   private updateStatusBar(): void {
     const s = this.sessions.current;
     const spin = this.busy ? '$(sync~spin) ' : '$(sparkle) ';
-    this.statusBar.text = `${spin}${displayName(s.model)} · ${formatUsd(this.grandTotal())}`;
-    this.statusBar.tooltip = `Claude Coder — session ${formatUsd(s.cost)}, total ${formatUsd(this.grandTotal())}. Click for details.`;
+    const label = s.backend === 'subscription' ? `${this.subscriptionModel()} (plan)` : displayName(s.model);
+    this.statusBar.text = `${spin}${label} · ${formatUsd(this.grandTotal())}`;
+    this.statusBar.tooltip =
+      `Claude Coder — credits: session ${formatUsd(s.cost)}, total ${formatUsd(this.grandTotal())}. ` +
+      `Subscription: ${this.subTotals.requests} runs, est. value ${formatUsd(this.subValueUsd)}. Click for details.`;
   }
 
   dispose(): void {

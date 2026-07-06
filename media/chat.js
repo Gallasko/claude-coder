@@ -308,7 +308,7 @@
         break;
       case 'sessionInfo':
         modelEl.textContent = msg.model + ' · ' + msg.effort;
-        costEl.textContent = msg.cost + ' (total ' + msg.totalCost + ')';
+        costEl.textContent = msg.costLine || msg.cost + ' (total ' + msg.totalCost + ')';
         taskEl.textContent = msg.task || '';
         break;
     }

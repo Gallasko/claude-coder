@@ -79,6 +79,16 @@
           "default": true,
           "description": "Use a cheap Haiku call to detect task changes and auto-reset the session."
         },
+        "claudeCoder.useSubscription": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run tasks through the Claude Agent SDK using your Claude Code login (Pro/Max plan) instead of API credits. Planning, classification and escalations still use credits. Requires Claude Code installed and logged in."
+        },
+        "claudeCoder.subscriptionModel": {
+          "type": "string",
+          "default": "sonnet",
+          "description": "Model alias for the subscription backend (sonnet | opus | haiku, or a full model id your plan supports)."
+        },
         "claudeCoder.planningEnabled": {
           "type": "boolean",
           "default": true,
@@ -149,6 +159,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.201",
     "@anthropic-ai/sdk": "latest"
   },
   "devDependencies": {

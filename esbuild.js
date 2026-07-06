@@ -13,6 +13,14 @@ const options = {
   target: 'node20',
   sourcemap: true,
   minify: false,
+  // The Agent SDK is ESM and reads import.meta.url at load time; shim it so
+  // the CJS bundle can resolve the SDK's bundled CLI path.
+  banner: {
+    js: "const import_meta_url = require('url').pathToFileURL(__filename).href;",
+  },
+  define: {
+    'import.meta.url': 'import_meta_url',
+  },
 };
 
 (async () => {
