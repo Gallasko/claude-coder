@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -174,7 +174,8 @@
     "vscode:prepublish": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
-    "package": "vsce package"
+    "package": "vsce package",
+    "bump": "bash scripts/bump-and-reinstall.sh"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.201",
