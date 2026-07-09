@@ -158,6 +158,48 @@ const CHARS_PER_TOKEN = 4;
 const DENY_MESSAGE = 'The user denied permission for this action. Adjust your approach or ask them.';
 
 /**
+ * Bash spellings of file reads/searches/edits. With the built-in Read/Grep
+ * hidden by disallowedTools, models reach for `cat`/`grep`/`sed` instead of
+ * the namespaced workspace-fs tools — sidestepping the read cache, memory
+ * tracking and diff approval. The prompt already forbids this but gets
+ * ignored, so canUseTool auto-denies these with a redirect (no permission
+ * card); the model retries with the right tool.
+ */
+const FS_COMMAND_REDIRECTS: Record<string, string> = {
+  cat: 'mcp__workspace-fs__read_file',
+  head: 'mcp__workspace-fs__read_file with offset/limit',
+  tail: 'mcp__workspace-fs__read_file with offset/limit',
+  nl: 'mcp__workspace-fs__read_file',
+  tac: 'mcp__workspace-fs__read_file',
+  less: 'mcp__workspace-fs__read_file',
+  more: 'mcp__workspace-fs__read_file',
+  sed: 'mcp__workspace-fs__read_file with offset/limit to read line ranges, or mcp__workspace-fs__edit_file to modify files',
+  awk: 'mcp__workspace-fs__grep or mcp__workspace-fs__read_file',
+  grep: 'mcp__workspace-fs__grep',
+  rg: 'mcp__workspace-fs__grep',
+  egrep: 'mcp__workspace-fs__grep',
+  fgrep: 'mcp__workspace-fs__grep',
+  find: 'mcp__workspace-fs__glob',
+  fd: 'mcp__workspace-fs__glob',
+};
+
+function redirectFsCommand(command: string): { cmd: string; message: string } | undefined {
+  const first = command.trim().split(/\s+/)[0] ?? '';
+  const bare = first.replace(/^.*\//, ''); // /usr/bin/grep → grep
+  const target = FS_COMMAND_REDIRECTS[bare];
+  if (!target) {
+    return undefined;
+  }
+  return {
+    cmd: bare,
+    message:
+      `Rejected automatically: do not use \`${bare}\` via Bash on workspace files. ` +
+      `Use ${target} instead — the workspace-fs tools are cached, memory-tracked, and handle their own approvals. ` +
+      'Retry now with the equivalent workspace-fs tool call.',
+  };
+}
+
+/**
  * The SDK's built-in CLI resolution breaks once we bundle the extension, so
  * we point it at the user's installed Claude Code binary — which must exist
  * anyway, since it holds the subscription login this backend runs on.
@@ -198,7 +240,21 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
     }
   };
 
+  // One notice per command kind per turn — the model may probe a few times
+  // before it switches, and each denial is already fed back to it.
+  const redirectedCmds = new Set<string>();
+
   const canUseTool: CanUseTool = async (toolName, input): Promise<PermissionResult> => {
+    if (toolName === 'Bash') {
+      const redirect = redirectFsCommand(String((input as Record<string, unknown>).command ?? ''));
+      if (redirect) {
+        if (!redirectedCmds.has(redirect.cmd)) {
+          redirectedCmds.add(redirect.cmd);
+          p.onNotice(`Blocked \`${redirect.cmd}\` in Bash — redirected to the workspace-fs tools.`);
+        }
+        return { behavior: 'deny', message: redirect.message };
+      }
+    }
     const req = mapToolToPermission(toolName, input, p.workspaceRoot);
     if (!req) {
       return { behavior: 'allow', updatedInput: input };
