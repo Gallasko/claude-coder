@@ -49,9 +49,9 @@ export class ChatHistoryPanel {
     const chats = this.store.all();
     const nonce = Math.random().toString(36).slice(2);
 
-    const totalCost = chats.reduce((sum, c) => sum + c.costUsd, 0);
-    const subscriptionCost = chats.reduce((sum, c) => sum + (c.backend === 'subscription' ? c.costUsd : 0), 0);
-    const apiCost = chats.reduce((sum, c) => sum + (c.backend === 'credits' ? c.costUsd : 0), 0);
+    const subscriptionCost = chats.reduce((sum, c) => sum + c.planCostUsd, 0);
+    const apiCost = chats.reduce((sum, c) => sum + c.creditCostUsd, 0);
+    const totalCost = subscriptionCost + apiCost;
     const totalMessages = chats.reduce((sum, c) => sum + c.promptCount, 0);
     const totalChars = chats.reduce((sum, c) => sum + c.userChars + c.assistantChars, 0);
 
@@ -68,7 +68,8 @@ export class ChatHistoryPanel {
           <td>${c.promptCount}</td>
           <td>${tok(c.userChars + c.assistantChars)}</td>
           <td>${tok(c.inputTokens + c.outputTokens)}</td>
-          <td>${formatUsd(c.costUsd)}</td>
+          <td>${formatUsd(c.planCostUsd)}</td>
+          <td>${formatUsd(c.creditCostUsd)}</td>
           <td>${duration(durationMs)}</td>
           <td class="summary" title="${esc(latest ? [latest.summary, ...latest.highlights].join('\n') : '')}">${esc(latest?.summary ?? '')}</td>
         </tr>`;
@@ -110,7 +111,7 @@ export class ChatHistoryPanel {
 
   ${
     chats.length
-      ? `<table><tr><th>Started</th><th>Project</th><th>Title</th><th>Model</th><th>Msgs</th><th>Length</th><th>Tokens</th><th>Cost</th><th>Duration</th><th>Summary</th></tr>${rows}</table>`
+      ? `<table><tr><th>Started</th><th>Project</th><th>Title</th><th>Model</th><th>Msgs</th><th>Length</th><th>Tokens</th><th>Plan cost</th><th>Credit cost</th><th>Duration</th><th>Summary</th></tr>${rows}</table>`
       : '<p class="empty">No chats recorded yet.</p>'
   }
 

@@ -681,6 +681,7 @@ export class Controller {
             costUsd: costUsd(totals, session.model),
           });
           this.chatHistoryStore?.addUsage(session.id, {
+            backend: 'credits',
             inputTokens: totals.inputTokens,
             outputTokens: totals.outputTokens,
             cacheReadTokens: totals.cacheReadTokens,
@@ -697,6 +698,7 @@ export class Controller {
       }, this.abort.signal, minimize);
 
       this.chatHistoryStore?.addUsage(session.id, {
+        backend: 'credits',
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
@@ -783,6 +785,7 @@ export class Controller {
       costUsd: result.estValueUsd,
     });
     this.chatHistoryStore?.addUsage(session.id, {
+      backend: 'subscription',
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       cacheReadTokens: result.usage.cacheReadTokens,

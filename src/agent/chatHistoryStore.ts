@@ -15,7 +15,10 @@ export interface ChatRecord {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  costUsd: number;
+  /** Estimated plan value of subscription-backend usage (not billed as credits). */
+  planCostUsd: number;
+  /** Actual USD billed against the credits/API backend. */
+  creditCostUsd: number;
   userChars: number;
   assistantChars: number;
 }
@@ -23,6 +26,7 @@ export interface ChatRecord {
 export type ChatInit = Pick<ChatRecord, 'projectPath' | 'projectName' | 'title' | 'model' | 'backend' | 'createdAt'>;
 
 export interface ChatUsageDelta {
+  backend: 'credits' | 'subscription';
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -51,7 +55,13 @@ export class ChatHistoryStore {
       const raw = await fs.readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        for (const rec of parsed as ChatRecord[]) {
+        for (const rec of parsed as (ChatRecord & { costUsd?: number })[]) {
+          if (rec.planCostUsd === undefined || rec.creditCostUsd === undefined) {
+            const legacyCost = rec.costUsd ?? 0;
+            rec.planCostUsd = rec.backend === 'subscription' ? legacyCost : 0;
+            rec.creditCostUsd = rec.backend === 'subscription' ? 0 : legacyCost;
+          }
+          delete rec.costUsd;
           store.chats.set(rec.id, rec);
         }
       }
@@ -74,7 +84,8 @@ export class ChatHistoryStore {
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
-        costUsd: 0,
+        planCostUsd: 0,
+        creditCostUsd: 0,
         userChars: 0,
         assistantChars: 0,
       };
@@ -107,7 +118,11 @@ export class ChatHistoryStore {
     rec.outputTokens += delta.outputTokens;
     rec.cacheReadTokens += delta.cacheReadTokens;
     rec.cacheWriteTokens += delta.cacheWriteTokens;
-    rec.costUsd += delta.costUsd;
+    if (delta.backend === 'subscription') {
+      rec.planCostUsd += delta.costUsd;
+    } else {
+      rec.creditCostUsd += delta.costUsd;
+    }
     rec.assistantChars += delta.assistantChars;
     rec.updatedAt = Date.now();
     this.markDirty();
