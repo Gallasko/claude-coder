@@ -22,13 +22,16 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: 'read_file',
     description:
-      'Read a file. Returns numbered lines. Use offset/limit for large files. Paths outside the workspace require user permission.',
+      'Read a file. Returns numbered lines. Use offset/limit for large files. Paths outside the workspace require user permission. ' +
+      'A whole-file read may return a cached summary instead of the raw content to save context, clearly labeled as such — ' +
+      'pass full:true to force the exact raw content (required before editing with edit_file).',
     input_schema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Workspace-relative or absolute file path' },
         offset: { type: 'number', description: '1-based line to start from (optional)' },
         limit: { type: 'number', description: 'Max lines to return (optional)' },
+        full: { type: 'boolean', description: 'Force the exact raw content even if a cached summary is available (optional)' },
       },
       required: ['path'],
     },
@@ -122,12 +125,22 @@ export interface ToolContext {
   workspaceRoot: string;
   /** Ask the user (in the chat panel). Resolves true if allowed. */
   requestPermission: (req: PermissionRequest) => Promise<boolean>;
+  /** Like requestPermission, but also opens a native diff editor for the proposed change. Resolves true if allowed. */
+  requestEditApproval: (
+    req: PermissionRequest,
+    before: string,
+    after: string,
+    filePath: string,
+    fileExists: boolean
+  ) => Promise<boolean>;
   /** Persistent per-project cache of read hashes + edit history. */
   memory: MemoryStore;
   taskId: string;
   taskSummary: string;
   /** Whole-file hashes already sent in this session's transcript (in-memory, per Session). */
   readCache: Map<string, string>;
+  /** Best-effort file summarizer for the lazy read cache (see summarizer.ts summarizeFile). Absent when no API client is configured. */
+  summarizeFile?: (path: string, content: string) => Promise<string | undefined>;
 }
 
 function fileHash(content: string): string {
@@ -165,13 +178,35 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
       throw new Error(DENIED);
     }
   }
+  const wholeFile = !input.offset && !input.limit;
+  const forceFull = !!input.full;
+
+  // Lazy summary cache: for a whole-file read, check size+mtime against the
+  // stored record BEFORE touching the file's content — if a summary was
+  // generated against this exact size+mtime, serve it instead of reading and
+  // resending the raw file. Skipped once a session has already read the file
+  // raw (readCache below takes over from there).
+  if (wholeFile && !forceFull) {
+    try {
+      const stat = await fs.stat(abs);
+      const cached = ctx.memory.freshSummary(display, stat.mtimeMs, stat.size);
+      if (cached) {
+        return (
+          `${display}: cached summary (unchanged since last summarized) — pass full:true to read the exact ` +
+          `file content (required before editing).\n\n${cached}`
+        );
+      }
+    } catch {
+      // fall through to the real read below, which will surface the error
+    }
+  }
+
   const raw = await fs.readFile(abs, 'utf8');
   const hash = fileHash(raw);
   ctx.memory.noteRead(display, hash);
 
   // Whole-file reads already sent verbatim earlier in this session don't
   // need to be resent — the model still has them in its own transcript.
-  const wholeFile = !input.offset && !input.limit;
   if (wholeFile && ctx.readCache.get(display) === hash) {
     return `${display}: unchanged since it was read in full earlier in this session (hash ${hash}) — reuse that content, no need to re-read.`;
   }
@@ -190,6 +225,17 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
   const result = truncate(numbered + footer);
   if (wholeFile) {
     ctx.readCache.set(display, hash);
+    // Best-effort, never blocks this read: refresh the summary cache for
+    // next time, keyed to the size+mtime just read.
+    if (ctx.summarizeFile && !raw.includes(' ') && raw.length > 2000) {
+      fs.stat(abs)
+        .then((stat) => ctx.summarizeFile!(display, raw).then((summary) => {
+          if (summary) {
+            ctx.memory.saveSummary(display, stat.mtimeMs, stat.size, summary);
+          }
+        }))
+        .catch(() => undefined);
+    }
   }
   return result;
 }
@@ -197,27 +243,41 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
 async function writeFileTool(ctx: ToolContext, input: any): Promise<string> {
   const { abs, outside, display } = resolvePath(ctx.workspaceRoot, input.path);
   const content = String(input.content);
-  const ok = outside
-    ? await ctx.requestPermission({
-        kind: 'outside-write',
-        key: `write:${path.dirname(abs)}`,
-        title: 'Write a file outside the workspace',
-        detail: `${abs}\n(${content.length} chars)`,
-      })
-    : await ctx.requestPermission({
-        kind: 'edit',
-        key: 'workspace-edits',
-        title: `Write ${display}`,
-        detail: `${display} (${content.length} chars)\n${preview(content, 300)}`,
-      });
-  if (!ok) {
-    throw new Error(DENIED);
-  }
-  let before = '(new file)';
+  let before = '';
+  let existed = false;
   try {
-    before = preview(await fs.readFile(abs, 'utf8'), 300);
+    before = await fs.readFile(abs, 'utf8');
+    existed = true;
   } catch {
     // file didn't exist yet
+  }
+  const ok = outside
+    ? await ctx.requestEditApproval(
+        {
+          kind: 'outside-write',
+          key: `write:${path.dirname(abs)}`,
+          title: 'Write a file outside the workspace',
+          detail: `${abs}\n(${content.length} chars)`,
+        },
+        before,
+        content,
+        abs,
+        existed
+      )
+    : await ctx.requestEditApproval(
+        {
+          kind: 'edit',
+          key: 'workspace-edits',
+          title: `Write ${display}`,
+          detail: `${display} (${content.length} chars)\n${preview(content, 300)}`,
+        },
+        before,
+        content,
+        abs,
+        existed
+      );
+  if (!ok) {
+    throw new Error(DENIED);
   }
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, content, 'utf8');
@@ -226,7 +286,7 @@ async function writeFileTool(ctx: ToolContext, input: any): Promise<string> {
     taskSummary: ctx.taskSummary,
     path: display,
     tool: 'write_file',
-    before,
+    before: before ? preview(before, 300) : '(new file)',
     after: preview(content, 300),
   });
   ctx.readCache.set(display, fileHash(content));
@@ -237,22 +297,6 @@ async function editFileTool(ctx: ToolContext, input: any): Promise<string> {
   const { abs, outside, display } = resolvePath(ctx.workspaceRoot, input.path);
   const oldStr = String(input.old_string);
   const newStr = String(input.new_string);
-  const ok = outside
-    ? await ctx.requestPermission({
-        kind: 'outside-write',
-        key: `write:${path.dirname(abs)}`,
-        title: 'Edit a file outside the workspace',
-        detail: `${abs}\n- ${preview(oldStr)}\n+ ${preview(newStr)}`,
-      })
-    : await ctx.requestPermission({
-        kind: 'edit',
-        key: 'workspace-edits',
-        title: `Edit ${display}`,
-        detail: `- ${preview(oldStr)}\n+ ${preview(newStr)}`,
-      });
-  if (!ok) {
-    throw new Error(DENIED);
-  }
   const raw = await fs.readFile(abs, 'utf8');
   if (!raw.includes(oldStr)) {
     throw new Error('old_string not found in file. Read the file and match the content exactly.');
@@ -268,6 +312,34 @@ async function editFileTool(ctx: ToolContext, input: any): Promise<string> {
       );
     }
     updated = raw.replace(oldStr, newStr);
+  }
+  const ok = outside
+    ? await ctx.requestEditApproval(
+        {
+          kind: 'outside-write',
+          key: `write:${path.dirname(abs)}`,
+          title: 'Edit a file outside the workspace',
+          detail: `${abs}\n- ${preview(oldStr)}\n+ ${preview(newStr)}`,
+        },
+        raw,
+        updated,
+        abs,
+        true
+      )
+    : await ctx.requestEditApproval(
+        {
+          kind: 'edit',
+          key: 'workspace-edits',
+          title: `Edit ${display}`,
+          detail: `- ${preview(oldStr)}\n+ ${preview(newStr)}`,
+        },
+        raw,
+        updated,
+        abs,
+        true
+      );
+  if (!ok) {
+    throw new Error(DENIED);
   }
   await fs.writeFile(abs, updated, 'utf8');
   ctx.memory.noteChange({

@@ -174,6 +174,57 @@ export async function findRelevantChats(
   return parsed.relevantChatIds.slice(0, limit);
 }
 
+const FILE_SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: {
+      type: 'string',
+      description:
+        'Concise digest for a coding agent deciding whether it needs the full file: purpose, exported/public API, ' +
+        'key functions or classes with signatures, notable dependencies, and any TODOs.',
+    },
+  },
+  required: ['summary'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call that turns a file's content into a short digest — stored
+ * in MemoryStore (see memory.ts) and served instead of the raw file on later
+ * read_file calls, as long as the file hasn't changed (see tools.ts).
+ */
+export async function summarizeFile(
+  client: Anthropic,
+  filePath: string,
+  content: string,
+  totals: UsageTotals
+): Promise<string | undefined> {
+  const trimmed = content.slice(0, 20_000);
+  if (!trimmed.trim()) {
+    return undefined;
+  }
+  const response = await client.messages.create({
+    model: CLASSIFIER_MODEL,
+    max_tokens: 400,
+    output_config: { format: { type: 'json_schema', schema: FILE_SUMMARY_SCHEMA as any } },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          `Summarize this file for a coding agent's lazy read cache: ${filePath}`,
+          `"""${trimmed}"""`,
+        ].join('\n\n'),
+      },
+    ],
+  });
+  addUsage(totals, response.usage);
+  const text = response.content.find((b) => b.type === 'text');
+  if (!text || text.type !== 'text') {
+    return undefined;
+  }
+  return (JSON.parse(text.text) as { summary: string }).summary;
+}
+
 function buildTranscript(session: Session): string {
   if (session.backend === 'subscription') {
     return session.assistantLog.join('\n\n');

@@ -104,6 +104,7 @@
     { name: 'costs', desc: 'Show session cost breakdown' },
     { name: 'usage', desc: 'Show usage history & billing tracker' },
     { name: 'history', desc: 'Show all chats & sessions' },
+    { name: 'memory', desc: 'Show project memory (notes, changes, file summaries)' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
     { name: 'commit', desc: 'Commit current changes (/commit <message>)' },
     { name: 'help', desc: 'List available commands' },
@@ -184,6 +185,9 @@
         break;
       case 'history':
         vscode.postMessage({ type: 'showChatHistory' });
+        break;
+      case 'memory':
+        vscode.postMessage({ type: 'showMemory' });
         break;
       case 'reset-permissions':
         vscode.postMessage({ type: 'resetPermissions' });
@@ -317,8 +321,9 @@
       case 'permission': {
         streamEl = null;
         const isPlan = msg.kind === 'plan';
+        const isDiff = msg.kind === 'diff';
         const card = document.createElement('div');
-        card.className = 'msg permission' + (isPlan ? ' plan-approval' : '');
+        card.className = 'msg permission' + (isPlan ? ' plan-approval' : '') + (isDiff ? ' diff-approval' : '');
         card.dataset.permId = String(msg.id);
 
         const title = document.createElement('div');
@@ -340,11 +345,17 @@
               ['yes', 'Approve'],
               ['no', 'Reject'],
             ]
-          : [
-              ['yes', 'Yes'],
-              ['always', "Yes, don't ask again"],
-              ['no', 'No'],
-            ]
+          : isDiff
+            ? [
+                ['yes', 'Apply'],
+                ['always', "Apply, don't ask again"],
+                ['no', 'Discard'],
+              ]
+            : [
+                ['yes', 'Yes'],
+                ['always', "Yes, don't ask again"],
+                ['no', 'No'],
+              ]
         ).forEach(([choice, label]) => {
           const b = document.createElement('button');
           b.textContent = label;
@@ -372,11 +383,17 @@
             ? msg.choice === 'no'
               ? '✗ Rejected'
               : '✓ Approved'
-            : msg.choice === 'always'
-              ? '✓ Allowed (always)'
-              : msg.choice === 'yes'
-                ? '✓ Allowed'
-                : '✗ Denied';
+            : card.classList.contains('diff-approval')
+              ? msg.choice === 'no'
+                ? '✗ Discarded'
+                : msg.choice === 'always'
+                  ? '✓ Applied (always)'
+                  : '✓ Applied'
+              : msg.choice === 'always'
+                ? '✓ Allowed (always)'
+                : msg.choice === 'yes'
+                  ? '✓ Allowed'
+                  : '✗ Denied';
           card.appendChild(verdict);
         }
         break;

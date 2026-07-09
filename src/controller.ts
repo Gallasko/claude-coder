@@ -28,7 +28,7 @@ import { UsagePanel } from './usage/panel';
 import { ChatHistoryStore } from './agent/chatHistoryStore';
 import { ProjectStore } from './agent/projectStore';
 import { SummaryStore, SummaryRecord } from './agent/summaryStore';
-import { summarizeSession, findRelevantChats, summarizeCommitMessage } from './agent/summarizer';
+import { summarizeSession, findRelevantChats, summarizeCommitMessage, summarizeFile } from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
 import {
   CLASSIFIER_MODEL,
@@ -71,6 +71,8 @@ export class Controller {
 
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
   private permissionId = 0;
+  /** Virtual document content for diff-preview URIs (scheme `claude-coder-diff`), keyed by uri.toString(). */
+  private diffVirtualContent = new Map<string, string>();
   private memory: MemoryStore | undefined;
   /** Persistent, cross-workspace usage/billing history — see usageStore.ts. */
   private usageStore: UsageStore | undefined;
@@ -97,6 +99,11 @@ export class Controller {
     this.chatHistoryStoreReady = this.initChatHistoryStore();
     this.projectStoreReady = this.initProjectStore();
     this.summaryStoreReady = this.initSummaryStore();
+    this.context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider('claude-coder-diff', {
+        provideTextDocumentContent: (uri) => this.diffVirtualContent.get(uri.toString()) ?? '',
+      })
+    );
   }
 
   private async initUsageStore(): Promise<UsageStore> {
@@ -319,6 +326,37 @@ export class Controller {
       const c: PermissionChoice = choice === 'always' ? 'always' : choice === 'yes' ? 'yes' : 'no';
       resolver(c);
     }
+  }
+
+  /** Same plumbing as requestPermission, but also opens a native diff editor for the proposed change. */
+  private async requestEditApproval(
+    req: PermissionRequest,
+    before: string,
+    after: string,
+    filePath: string,
+    fileExists: boolean
+  ): Promise<boolean> {
+    const session = this.sessions.current;
+    if (session.alwaysAllowed.has(req.key)) {
+      return true;
+    }
+    const id = ++this.permissionId;
+    const choicePromise = new Promise<PermissionChoice>((resolve) => {
+      this.permissionResolvers.set(id, resolve);
+    });
+    const diffFiles = await this.openDiffInEditor(id, req.title, filePath, fileExists, after);
+    this.post({ type: 'permission', id, kind: 'diff', title: req.title, detail: req.detail });
+    const choice = await choicePromise;
+    this.permissionResolvers.delete(id);
+    this.post({ type: 'permissionResolved', id, choice });
+    await this.closeDiffFiles(diffFiles);
+    if (choice === 'always') {
+      session.alwaysAllowed.add(req.key);
+      this.log.appendLine(`[perm] always-allow "${req.key}" (chat #${session.id})`);
+      return true;
+    }
+    this.log.appendLine(`[perm] ${choice} "${req.key}"`);
+    return choice === 'yes';
   }
 
   /** Same plumbing as requestPermission, but no autoApprove/alwaysAllowed bypass — plan review is never silent. */
@@ -620,7 +658,7 @@ export class Controller {
         this.post({ type: 'turnDone', stopReason: 'error' });
         return;
       }
-      const toolCtx = this.buildToolContext(session, memory);
+      const toolCtx = this.buildToolContext(session, memory, client);
       const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
 
       let assistantCharsThisTurn = 0;
@@ -983,15 +1021,51 @@ export class Controller {
     const memory = await this.ensureMemory();
     const notes = memory.listNotes(20);
     const changes = memory.recentChanges(20);
+    const summaries = memory.listSummaries(30);
+    const root = this.tryWorkspaceRoot();
+
     const noteLines = notes.map((n) => `${new Date(n.createdAt).toLocaleString()}  note  ${n.text}`);
     const changeLines = changes.map(
       (c) => `${new Date(c.timestamp).toLocaleString()}  ${c.tool}  ${c.path}  (${c.taskSummary || 'unknown task'})`
     );
-    const lines = [...noteLines, ...changeLines];
+    const summaryLines = (
+      await Promise.all(
+        summaries.map(async (s) => {
+          const status = await this.summaryFreshness(root, s);
+          if (status === 'deleted') {
+            memory.forgetFile(s.path);
+            return undefined;
+          }
+          const firstLine = s.summary?.split('\n').find((l) => l.trim()) ?? '';
+          return `${new Date(s.summarizedAt ?? 0).toLocaleString()}  [${status}]  ${s.path}  — ${firstLine}`;
+        })
+      )
+    ).filter((l): l is string => !!l);
+
+    const sections = [
+      noteLines.length ? `Notes:\n${noteLines.join('\n')}` : '',
+      changeLines.length ? `Recent changes:\n${changeLines.join('\n')}` : '',
+      summaryLines.length ? `File summaries (read_file lazy cache):\n${summaryLines.join('\n')}` : '',
+    ].filter(Boolean);
+
     vscode.window.showInformationMessage(
-      lines.length === 0 ? 'No project memory yet.' : lines.join('\n'),
+      sections.length === 0 ? 'No project memory yet.' : sections.join('\n\n'),
       { modal: true }
     );
+  }
+
+  /** Freshness label for a cached file summary — stats the file, doesn't re-read its content. */
+  private async summaryFreshness(root: string | undefined, s: { path: string; mtimeMs?: number; size?: number }): Promise<string> {
+    if (!root) {
+      return 'unknown';
+    }
+    const abs = path.isAbsolute(s.path) ? s.path : path.join(root, s.path);
+    try {
+      const stat = await fs.stat(abs);
+      return stat.mtimeMs === s.mtimeMs && stat.size === s.size ? 'fresh' : 'stale';
+    } catch {
+      return 'deleted';
+    }
   }
 
   /**
@@ -1027,6 +1101,50 @@ export class Controller {
     } finally {
       await fs.unlink(planFile.fsPath).catch(() => undefined);
     }
+  }
+
+  /**
+   * Opens a native side-by-side diff editor for a proposed write_file/edit_file change.
+   * The "before" side is the real file on disk (like VS Code's own Git diff view) when it
+   * already exists; for brand-new files it falls back to a virtual empty document. The
+   * "after" side (not yet written) is always a virtual document served by the
+   * `claude-coder-diff` content provider registered in the constructor.
+   */
+  private async openDiffInEditor(
+    id: number,
+    title: string,
+    filePath: string,
+    fileExists: boolean,
+    after: string
+  ): Promise<{ beforeUri: vscode.Uri; afterUri: vscode.Uri }> {
+    const basename = path.basename(filePath) || 'file';
+    const afterUri = vscode.Uri.parse(`claude-coder-diff:/${id}/after/${basename}`);
+    this.diffVirtualContent.set(afterUri.toString(), after);
+    const beforeUri = fileExists
+      ? vscode.Uri.file(filePath)
+      : vscode.Uri.parse(`claude-coder-diff:/${id}/before/${basename}`);
+    if (!fileExists) {
+      this.diffVirtualContent.set(beforeUri.toString(), '');
+    }
+    await vscode.commands.executeCommand('vscode.diff', beforeUri, afterUri, title);
+    return { beforeUri, afterUri };
+  }
+
+  /** Closes the diff editor tab and releases its virtual document content. */
+  private async closeDiffFiles(diffFiles: { beforeUri: vscode.Uri; afterUri: vscode.Uri }): Promise<void> {
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (
+          tab.input instanceof vscode.TabInputTextDiff &&
+          tab.input.original.toString() === diffFiles.beforeUri.toString() &&
+          tab.input.modified.toString() === diffFiles.afterUri.toString()
+        ) {
+          await vscode.window.tabGroups.close(tab);
+        }
+      }
+    }
+    this.diffVirtualContent.delete(diffFiles.beforeUri.toString());
+    this.diffVirtualContent.delete(diffFiles.afterUri.toString());
   }
 
   /** Manual, freeform memory note for the current project (see MemoryStore.addNote). */
@@ -1088,15 +1206,46 @@ export class Controller {
     return this.memory;
   }
 
-  private buildToolContext(session: Session, memory: MemoryStore): ToolContext {
+  private buildToolContext(session: Session, memory: MemoryStore, client: Anthropic): ToolContext {
     return {
       workspaceRoot: this.workspaceRoot(),
       requestPermission: (req) => this.requestPermission(req),
+      requestEditApproval: (req, before, after, filePath, fileExists) =>
+        this.requestEditApproval(req, before, after, filePath, fileExists),
       memory,
       taskId: String(session.id),
       taskSummary: session.taskSummary,
       readCache: session.readCache,
+      summarizeFile: (path, content) => this.summarizeFileForMemory(client, path, content),
     };
+  }
+
+  /**
+   * Best-effort file digest for the lazy read-file summary cache (see
+   * tools.ts readFileTool / memory.ts MemoryStore.saveSummary). Never throws
+   * — a missed summary just means the next read falls back to raw content.
+   */
+  private async summarizeFileForMemory(client: Anthropic, filePath: string, content: string): Promise<string | undefined> {
+    try {
+      const before = this.snapshotTotals(this.classifierTotals);
+      const summary = await summarizeFile(client, filePath, content, this.classifierTotals);
+      const delta = this.deltaTotals(before, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'summarize',
+        sessionId: this.sessions.current.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
+      return summary;
+    } catch (e: any) {
+      this.log.appendLine(`[file summarize error] ${e?.message ?? e}`);
+      return undefined;
+    }
   }
 
   private workspaceRoot(): string {

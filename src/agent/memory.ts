@@ -4,6 +4,15 @@ import * as path from 'path';
 export interface FileRecord {
   hash: string;
   lastReadAt: number;
+  /** Size/mtime the last summary was generated against — the freshness key (cheaper than re-hashing to check). */
+  size?: number;
+  mtimeMs?: number;
+  summary?: string;
+  summarizedAt?: number;
+}
+
+export interface FileSummaryEntry extends FileRecord {
+  path: string;
 }
 
 export interface ChangeRecord {
@@ -69,7 +78,9 @@ export class MemoryStore {
     this.dirty = false;
     try {
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      await fs.writeFile(this.filePath, JSON.stringify(this.data), 'utf8');
+      const tmp = `${this.filePath}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(this.data), 'utf8');
+      await fs.rename(tmp, this.filePath);
     } catch {
       // best-effort persistence; never block the agent on a disk error
     }
@@ -83,6 +94,44 @@ export class MemoryStore {
 
   getFileRecord(filePath: string): FileRecord | undefined {
     return this.data.files[filePath];
+  }
+
+  /** Returns the cached summary only if it was generated against this exact size+mtime — otherwise stale/missing. */
+  freshSummary(filePath: string, mtimeMs: number, size: number): string | undefined {
+    const rec = this.data.files[filePath];
+    return rec?.summary && rec.mtimeMs === mtimeMs && rec.size === size ? rec.summary : undefined;
+  }
+
+  /** Persists a lazily-generated file summary, keyed to the size+mtime it was generated against. */
+  saveSummary(filePath: string, mtimeMs: number, size: number, summary: string): void {
+    const existing = this.data.files[filePath];
+    this.data.files[filePath] = {
+      hash: existing?.hash ?? '',
+      lastReadAt: existing?.lastReadAt ?? Date.now(),
+      size,
+      mtimeMs,
+      summary,
+      summarizedAt: Date.now(),
+    };
+    this.dirty = true;
+    void this.save();
+  }
+
+  /** All cached file summaries, most recently generated first — for the /memory view. */
+  listSummaries(limit = 100): FileSummaryEntry[] {
+    return Object.entries(this.data.files)
+      .filter(([, r]) => !!r.summary)
+      .map(([path, r]) => ({ path, ...r }))
+      .sort((a, b) => (b.summarizedAt ?? 0) - (a.summarizedAt ?? 0))
+      .slice(0, limit);
+  }
+
+  /** Drops the record for a file that no longer exists on disk (see controller.ts showMemory pruning). */
+  forgetFile(filePath: string): void {
+    if (delete this.data.files[filePath]) {
+      this.dirty = true;
+      void this.save();
+    }
   }
 
   noteChange(change: Omit<ChangeRecord, 'timestamp'>): void {
