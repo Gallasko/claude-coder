@@ -43,6 +43,11 @@ export class UsagePanel {
     const s = this.store.summary();
     const nonce = Math.random().toString(36).slice(2);
     const totalCost = s.creditsCostUsd + s.subscriptionEstValueUsd;
+    const graphData = {
+      hour: this.store.buckets('hour'),
+      day: this.store.buckets('day'),
+      week: this.store.buckets('week'),
+    };
 
     const dayRows = s.byDay
       .map(
@@ -94,6 +99,13 @@ export class UsagePanel {
     button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     .empty { opacity: 0.6; font-style: italic; }
+    .graph-controls { margin-bottom: 8px; }
+    .graph-controls button { opacity: 0.6; margin-right: 4px; }
+    .graph-controls button.active { opacity: 1; }
+    .graph { display: flex; align-items: flex-end; gap: 2px; height: 140px; border-bottom: 1px solid var(--vscode-widget-border); padding: 0 4px; }
+    .graph-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 2px; }
+    .graph-bar .bar { width: 100%; background: var(--vscode-button-background); border-radius: 2px 2px 0 0; min-height: 1px; }
+    .graph-bar .bar-label { font-size: 9px; opacity: 0.7; margin-top: 4px; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -106,6 +118,18 @@ export class UsagePanel {
     )}</div></div>
     <div class="stat"><div class="label">Combined</div><div class="value">${formatUsd(totalCost)}</div></div>
   </div>
+
+  <h2>Usage graph</h2>
+  ${
+    s.totalRequests
+      ? `<div class="graph-controls">
+           <button class="gran-btn active" data-gran="hour">Hour</button>
+           <button class="gran-btn" data-gran="day">Day</button>
+           <button class="gran-btn" data-gran="week">Week</button>
+         </div>
+         <div id="graph" class="graph"></div>`
+      : '<p class="empty">No usage recorded yet.</p>'
+  }
 
   <h2>By day</h2>
   ${
@@ -137,6 +161,54 @@ export class UsagePanel {
         vscode.postMessage({ type: 'reset' });
       }
     });
+
+    const graphData = ${JSON.stringify(graphData)};
+
+    function renderGraph(gran) {
+      const graphEl = document.getElementById('graph');
+      if (!graphEl) {
+        return;
+      }
+      graphEl.innerHTML = '';
+      const buckets = graphData[gran];
+      const maxCost = Math.max(0, ...buckets.map((b) => b.costUsd));
+      const maxRequests = Math.max(0, ...buckets.map((b) => b.requests));
+      const useCost = maxCost > 0;
+      const max = useCost ? maxCost : maxRequests;
+      const tickEvery = Math.max(1, Math.ceil(buckets.length / 8));
+
+      buckets.forEach((b, i) => {
+        const col = document.createElement('div');
+        col.className = 'graph-bar';
+
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        const value = useCost ? b.costUsd : b.requests;
+        const pct = max > 0 ? Math.max((value / max) * 100, value > 0 ? 2 : 0) : 0;
+        bar.style.height = pct + '%';
+        bar.title = b.key + ': ' + b.requests + ' req, $' + b.costUsd.toFixed(4);
+        col.appendChild(bar);
+
+        if (i % tickEvery === 0 || i === buckets.length - 1) {
+          const label = document.createElement('div');
+          label.className = 'bar-label';
+          label.textContent = b.key;
+          col.appendChild(label);
+        }
+
+        graphEl.appendChild(col);
+      });
+    }
+
+    document.querySelectorAll('.gran-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.gran-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderGraph(btn.dataset.gran);
+      });
+    });
+
+    renderGraph('hour');
   </script>
 </body>
 </html>`;

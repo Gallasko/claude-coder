@@ -35,6 +35,19 @@ export interface UsageSummary {
   byModel: Aggregate[];
 }
 
+export type Granularity = 'hour' | 'day' | 'week';
+
+export interface Bucket {
+  /** Human-readable label for this bucket's start, in local time. */
+  key: string;
+  /** Epoch ms of the bucket's start (local-time aligned). */
+  start: number;
+  requests: number;
+  costUsd: number;
+}
+
+const BUCKET_COUNT: Record<Granularity, number> = { hour: 24, day: 14, week: 8 };
+
 const MAX_RECORDS = 5000;
 
 /**
@@ -115,6 +128,40 @@ export class UsageStore {
     };
   }
 
+  /**
+   * Fixed-width, local-time-aligned buckets ending at "now": last 24 hours
+   * (hourly), last 14 days (daily), or last 8 weeks (weekly, Monday-aligned).
+   * Empty buckets are included so gaps in usage are visible on the graph.
+   */
+  buckets(granularity: Granularity): Bucket[] {
+    const count = BUCKET_COUNT[granularity];
+    const stepMs = granularity === 'hour' ? 3_600_000 : granularity === 'day' ? 86_400_000 : 7 * 86_400_000;
+    const nowStart = bucketStart(Date.now(), granularity);
+    const starts: number[] = [];
+    for (let i = count - 1; i >= 0; i--) {
+      starts.push(nowStart - i * stepMs);
+    }
+
+    const byStart = new Map<number, Bucket>();
+    for (const s of starts) {
+      byStart.set(s, { key: bucketLabel(s, granularity), start: s, requests: 0, costUsd: 0 });
+    }
+
+    const minStart = starts[0];
+    for (const r of this.records) {
+      if (r.timestamp < minStart) {
+        continue;
+      }
+      const bucket = byStart.get(bucketStart(r.timestamp, granularity));
+      if (bucket) {
+        bucket.requests += 1;
+        bucket.costUsd += r.costUsd;
+      }
+    }
+
+    return starts.map((s) => byStart.get(s)!);
+  }
+
   /** Serializes writes so concurrent record() calls never clobber each other on disk. */
   private queueSave(): void {
     this.saveChain = this.saveChain.then(() => this.save());
@@ -132,6 +179,30 @@ export class UsageStore {
       // best-effort persistence; never block the agent on a disk error
     }
   }
+}
+
+/** Aligns a timestamp down to the start of its bucket, in local time. */
+function bucketStart(ts: number, granularity: Granularity): number {
+  const d = new Date(ts);
+  if (granularity === 'hour') {
+    d.setMinutes(0, 0, 0);
+  } else if (granularity === 'day') {
+    d.setHours(0, 0, 0, 0);
+  } else {
+    d.setHours(0, 0, 0, 0);
+    const dayOfWeek = d.getDay(); // 0 = Sunday
+    const sinceMonday = (dayOfWeek + 6) % 7;
+    d.setDate(d.getDate() - sinceMonday);
+  }
+  return d.getTime();
+}
+
+function bucketLabel(start: number, granularity: Granularity): string {
+  const d = new Date(start);
+  if (granularity === 'hour') {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
 function bump(map: Map<string, Aggregate>, key: string, r: UsageRecord): void {
