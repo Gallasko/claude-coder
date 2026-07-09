@@ -110,7 +110,7 @@ export class SessionManager {
   }
 }
 
-function extractText(msg: Anthropic.MessageParam | undefined): string {
+export function extractText(msg: Anthropic.MessageParam | undefined): string {
   if (!msg) {
     return '';
   }

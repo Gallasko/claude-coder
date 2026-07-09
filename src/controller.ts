@@ -22,6 +22,9 @@ import {
 import { UsageStore, UsageRecord } from './agent/usageStore';
 import { UsagePanel } from './usage/panel';
 import { ChatHistoryStore } from './agent/chatHistoryStore';
+import { ProjectStore } from './agent/projectStore';
+import { SummaryStore, SummaryRecord } from './agent/summaryStore';
+import { summarizeSession, findRelevantChats } from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
 import {
   CLASSIFIER_MODEL,
@@ -69,6 +72,12 @@ export class Controller {
   /** Persistent, cross-workspace chat history (cost/length/duration per chat) — see chatHistoryStore.ts. */
   private chatHistoryStore: ChatHistoryStore | undefined;
   private readonly chatHistoryStoreReady: Promise<ChatHistoryStore>;
+  /** Persistent, cross-workspace registry of projects Claude Coder has run in — see projectStore.ts. */
+  private projectStore: ProjectStore | undefined;
+  private readonly projectStoreReady: Promise<ProjectStore>;
+  /** Persistent, cross-workspace end-of-task chat summaries — see summaryStore.ts / summarizer.ts. */
+  private summaryStore: SummaryStore | undefined;
+  private readonly summaryStoreReady: Promise<SummaryStore>;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -80,6 +89,8 @@ export class Controller {
     this.statusBar.show();
     this.usageStoreReady = this.initUsageStore();
     this.chatHistoryStoreReady = this.initChatHistoryStore();
+    this.projectStoreReady = this.initProjectStore();
+    this.summaryStoreReady = this.initSummaryStore();
   }
 
   private async initUsageStore(): Promise<UsageStore> {
@@ -93,6 +104,20 @@ export class Controller {
     const dir = this.context.globalStorageUri.fsPath;
     const store = await ChatHistoryStore.load(path.join(dir, 'chat-history.json'));
     this.chatHistoryStore = store;
+    return store;
+  }
+
+  private async initProjectStore(): Promise<ProjectStore> {
+    const dir = this.context.globalStorageUri.fsPath;
+    const store = await ProjectStore.load(path.join(dir, 'projects.json'));
+    this.projectStore = store;
+    return store;
+  }
+
+  private async initSummaryStore(): Promise<SummaryStore> {
+    const dir = this.context.globalStorageUri.fsPath;
+    const store = await SummaryStore.load(path.join(dir, 'chat-summaries.json'));
+    this.summaryStore = store;
     return store;
   }
 
@@ -122,7 +147,8 @@ export class Controller {
 
   async showChatHistory(): Promise<void> {
     const store = await this.chatHistoryStoreReady;
-    ChatHistoryPanel.show(store, this.tryWorkspaceRoot());
+    const summaries = await this.summaryStoreReady;
+    ChatHistoryPanel.show(store, summaries, this.tryWorkspaceRoot());
   }
 
   attachUi(ui: UiSink): void {
@@ -391,7 +417,8 @@ export class Controller {
       session.promptCount += 1;
       let content = text;
       if (isFirst) {
-        content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan) + text;
+        const pastSummaries = await this.findRelevantPastSummaries(client, text);
+        content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan, pastSummaries) + text;
       }
 
       const minimize = this.minimizeOutputTokens();
@@ -697,6 +724,7 @@ export class Controller {
         costUsd: costUsd(delta, CLASSIFIER_MODEL),
       });
       if (c.task === 'new' && session.turns > 0) {
+        void this.archiveChat(session);
         const backend = this.defaultBackend();
         const fresh = this.sessions.reset(
           this.ladder()[0],
@@ -793,6 +821,7 @@ export class Controller {
 
   newTask(): void {
     this.cancel();
+    void this.archiveChat(this.sessions.current);
     this.sessions.reset(this.ladder()[0], undefined, undefined, this.defaultBackend());
     this.post({ type: 'taskSwitch', text: 'New session started.' });
     this.postSessionInfo();
@@ -896,7 +925,8 @@ export class Controller {
   private buildFirstMessagePreamble(
     carryOver: string | undefined,
     memory: MemoryStore,
-    plan: string | undefined
+    plan: string | undefined,
+    pastSummaries: SummaryRecord[]
   ): string {
     const root = this.workspaceRoot();
     const openFiles = vscode.window.tabGroups.all
@@ -905,11 +935,22 @@ export class Controller {
       .filter(Boolean)
       .slice(0, 15);
     const digest = memory.projectDigest();
+    const chatHistory = pastSummaries.length
+      ? `Summaries of past chats in this project that look relevant to this task:\n${pastSummaries
+          .map(
+            (s) =>
+              `- ${new Date(s.createdAt).toLocaleDateString()}: ${s.summary}${
+                s.highlights.length ? ` (${s.highlights.join('; ')})` : ''
+              }`
+          )
+          .join('\n')}`
+      : '';
     const parts = [
       `<context>`,
       `Workspace root: ${root}`,
       openFiles.length ? `Open editor tabs: ${openFiles.join(', ')}` : '',
       `</context>`,
+      chatHistory ? `<chat-history>\n${chatHistory}\n</chat-history>` : '',
       digest ? `<memory>\n${digest}\n</memory>` : '',
       plan ? `<plan>\n${plan}\n</plan>\nImplement the plan above. Don't re-derive it — follow it.` : '',
       carryOver ? `<summary-so-far>\n${carryOver}\n</summary-so-far>` : '',
@@ -968,6 +1009,92 @@ export class Controller {
       backend: session.backend,
       createdAt: Date.now(),
     });
+    if (root) {
+      this.projectStore?.ensure(root, path.basename(root));
+    }
+  }
+
+  /**
+   * Best-effort end-of-task summary: a cheap Haiku call turns the finished
+   * session's transcript into a durable summary, stored as the chat's
+   * "memory" for the project history view. Never blocks or throws — a
+   * missed summary must not interrupt the task switch that triggered it.
+   */
+  private async archiveChat(session: Session): Promise<void> {
+    if (!this.summaryStore || session.turns === 0) {
+      return;
+    }
+    try {
+      const client = await this.tryGetClient();
+      if (!client) {
+        return;
+      }
+      const before = this.snapshotTotals(this.classifierTotals);
+      const { summary, highlights } = await summarizeSession(client, session, this.classifierTotals);
+      const delta = this.deltaTotals(before, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'summarize',
+        sessionId: session.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
+      this.summaryStore.add({
+        chatId: session.id,
+        projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+        model: CLASSIFIER_MODEL,
+        summary,
+        highlights,
+      });
+    } catch (e: any) {
+      this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
+    }
+  }
+
+  /**
+   * Best-effort: ask Haiku which past chats in this project (if any) are
+   * relevant to the upcoming task, so a new chat reuses the right memories
+   * instead of just the most recent ones. Falls back to recency without a
+   * client or on error.
+   */
+  private async findRelevantPastSummaries(client: Anthropic | undefined, upcomingTask: string): Promise<SummaryRecord[]> {
+    const root = this.tryWorkspaceRoot();
+    if (!root || !this.summaryStore) {
+      return [];
+    }
+    const summaries = await this.summaryStoreReady;
+    const candidates = summaries.latestForProject(root, 20);
+    if (candidates.length === 0) {
+      return [];
+    }
+    if (!client) {
+      return candidates.slice(0, 5);
+    }
+    try {
+      const before = this.snapshotTotals(this.classifierTotals);
+      const ids = await findRelevantChats(client, this.classifierTotals, upcomingTask, candidates);
+      const delta = this.deltaTotals(before, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'recall',
+        sessionId: this.sessions.current.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
+      const byId = new Map(candidates.map((c) => [c.chatId, c]));
+      return ids.map((id) => byId.get(id)).filter((s): s is SummaryRecord => !!s);
+    } catch (e: any) {
+      this.log.appendLine(`[recall error] ${e?.message ?? e}`);
+      return candidates.slice(0, 5);
+    }
   }
 
   private warnIfContextLarge(inputTokens: number): void {

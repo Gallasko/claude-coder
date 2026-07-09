@@ -1,23 +1,25 @@
 import * as vscode from 'vscode';
 import { ChatHistoryStore } from '../agent/chatHistoryStore';
+import { SummaryStore } from '../agent/summaryStore';
 import { displayName, formatUsd } from '../agent/models';
 
-/** Singleton webview panel listing every recorded chat (cost, length, duration). */
+/** Singleton webview panel listing every recorded chat (cost, length, duration, summary). */
 export class ChatHistoryPanel {
   private static current: ChatHistoryPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
 
-  static show(store: ChatHistoryStore, currentProjectPath: string | undefined): void {
+  static show(store: ChatHistoryStore, summaries: SummaryStore, currentProjectPath: string | undefined): void {
     if (ChatHistoryPanel.current) {
       ChatHistoryPanel.current.panel.reveal(vscode.ViewColumn.Active);
       ChatHistoryPanel.current.render();
       return;
     }
-    ChatHistoryPanel.current = new ChatHistoryPanel(store, currentProjectPath);
+    ChatHistoryPanel.current = new ChatHistoryPanel(store, summaries, currentProjectPath);
   }
 
   private constructor(
     private readonly store: ChatHistoryStore,
+    private readonly summaries: SummaryStore,
     private readonly currentProjectPath: string | undefined
   ) {
     this.panel = vscode.window.createWebviewPanel(
@@ -32,6 +34,7 @@ export class ChatHistoryPanel {
     this.panel.webview.onDidReceiveMessage((msg) => {
       if (msg?.type === 'reset') {
         this.store.reset();
+        this.summaries.reset();
         this.render();
       }
     });
@@ -54,6 +57,7 @@ export class ChatHistoryPanel {
       .map((c) => {
         const durationMs = Math.max(0, c.updatedAt - c.createdAt);
         const isCurrent = this.currentProjectPath && c.projectPath === this.currentProjectPath;
+        const latest = this.summaries.latestForChat(c.id);
         return `<tr class="${isCurrent ? 'current' : ''}">
           <td>${new Date(c.createdAt).toLocaleString()}</td>
           <td>${esc(c.projectName)}</td>
@@ -64,6 +68,7 @@ export class ChatHistoryPanel {
           <td>${tok(c.inputTokens + c.outputTokens)}</td>
           <td>${formatUsd(c.costUsd)}</td>
           <td>${duration(durationMs)}</td>
+          <td class="summary" title="${esc(latest ? [latest.summary, ...latest.highlights].join('\n') : '')}">${esc(latest?.summary ?? '')}</td>
         </tr>`;
       })
       .join('');
@@ -83,6 +88,7 @@ export class ChatHistoryPanel {
     .stat .value { font-size: 20px; font-weight: 600; }
     table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
     th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--vscode-widget-border); font-size: 12px; }
+    td.summary { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
     th { opacity: 0.7; font-weight: 500; }
     tr.current { background: var(--vscode-list-inactiveSelectionBackground); }
     button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
@@ -100,7 +106,7 @@ export class ChatHistoryPanel {
 
   ${
     chats.length
-      ? `<table><tr><th>Started</th><th>Project</th><th>Title</th><th>Model</th><th>Msgs</th><th>Length</th><th>Tokens</th><th>Cost</th><th>Duration</th></tr>${rows}</table>`
+      ? `<table><tr><th>Started</th><th>Project</th><th>Title</th><th>Model</th><th>Msgs</th><th>Length</th><th>Tokens</th><th>Cost</th><th>Duration</th><th>Summary</th></tr>${rows}</table>`
       : '<p class="empty">No chats recorded yet.</p>'
   }
 

@@ -76,7 +76,24 @@ src/agent/memory.ts     persistent per-workspace read-hash cache + change histor
 src/agent/planner.ts    one-off tool-free planning call on the reasoning tier (Opus/Fable)
 src/agent/compressor.ts Haiku rewrite that shrinks long prose-heavy prompts (opt-in)
 src/agent/compactor.ts  Haiku summary that replaces a grown transcript (auto-compaction)
+src/agent/chatHistoryStore.ts  cross-workspace log: one record per chat (cost/length/duration)
+src/agent/projectStore.ts      cross-workspace registry of projects (workspace folders) ever opened
+src/agent/summaryStore.ts      cross-workspace log: one or more end-of-task summaries per chat
+src/agent/summarizer.ts        Haiku call that turns a finished session's transcript into a summary
+src/history/panel.ts           webview: chats across all projects, each with its latest summary
 ```
+
+## History / memory data model
+
+Three JSON stores under the extension's global storage directory (`context.globalStorageUri`), keyed by plain fields rather than a SQL schema — consistent with `chatHistoryStore.ts` / `usageStore.ts`:
+
+- **projects** (`projectStore.ts`) — one record per workspace folder ever opened (`path`, `name`, `createdAt`, `updatedAt`).
+- **chats** (`chatHistoryStore.ts`) — one record per session/task, tagged with `projectPath` (cost, length, duration, model).
+- **summaries** (`summaryStore.ts`) — append-only, one or more records per `chatId`. Written by `archiveChat()` in `controller.ts` whenever a task finishes (task-switch detected, or `New Task`): a cheap Haiku call (`summarizeSession`) reads the session transcript and produces a short summary + highlights, billed/logged like the classifier (`UsageKind: 'summarize'`).
+
+`chats.projectPath` and `summaries.projectPath` both join back to `projects.path` — there's no foreign-key enforcement (plain JSON files), so joins happen at read time in `ChatHistoryPanel`, which shows each chat's latest summary. Re-running the summarizer never deletes older summaries, so a chat's summary history survives.
+
+A new chat inherits the project's memory, picked by relevance rather than just recency: `findRelevantPastSummaries()` in `controller.ts` takes the last 20 chat summaries in the project (`SummaryStore.latestForProject()`) and the upcoming prompt, and asks Haiku (`findRelevantChats` in `summarizer.ts`, `UsageKind: 'recall'`) which of them are actually helpful for this task — an empty result is fine, it never forces irrelevant matches. Those get woven into the first message's `<chat-history>` block alongside the `<memory>` digest. Without an API key, or if the call errors, it falls back to the 5 most recent chats.
 
 ## Cache discipline rules (don't break these)
 
