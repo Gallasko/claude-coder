@@ -308,8 +308,9 @@
         break;
       case 'permission': {
         streamEl = null;
+        const isPlan = msg.kind === 'plan';
         const card = document.createElement('div');
-        card.className = 'msg permission';
+        card.className = 'msg permission' + (isPlan ? ' plan-approval' : '');
         card.dataset.permId = String(msg.id);
 
         const title = document.createElement('div');
@@ -326,11 +327,17 @@
 
         const buttons = document.createElement('div');
         buttons.className = 'perm-buttons';
-        [
-          ['yes', 'Yes'],
-          ['always', "Yes, don't ask again"],
-          ['no', 'No'],
-        ].forEach(([choice, label]) => {
+        (isPlan
+          ? [
+              ['yes', 'Approve'],
+              ['no', 'Reject'],
+            ]
+          : [
+              ['yes', 'Yes'],
+              ['always', "Yes, don't ask again"],
+              ['no', 'No'],
+            ]
+        ).forEach(([choice, label]) => {
           const b = document.createElement('button');
           b.textContent = label;
           b.className = 'perm-' + choice;
@@ -353,8 +360,15 @@
           }
           const verdict = document.createElement('div');
           verdict.className = 'perm-verdict ' + (msg.choice === 'no' ? 'denied' : 'allowed');
-          verdict.textContent =
-            msg.choice === 'always' ? '✓ Allowed (always)' : msg.choice === 'yes' ? '✓ Allowed' : '✗ Denied';
+          verdict.textContent = card.classList.contains('plan-approval')
+            ? msg.choice === 'no'
+              ? '✗ Rejected'
+              : '✓ Approved'
+            : msg.choice === 'always'
+              ? '✓ Allowed (always)'
+              : msg.choice === 'yes'
+                ? '✓ Allowed'
+                : '✗ Denied';
           card.appendChild(verdict);
         }
         break;

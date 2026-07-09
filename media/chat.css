@@ -143,6 +143,10 @@ body {
   color: var(--vscode-errorForeground);
 }
 
+.plan-approval .perm-detail {
+  word-break: normal;
+}
+
 .msg.setup {
   border: 1px solid var(--vscode-focusBorder);
   border-radius: 6px;

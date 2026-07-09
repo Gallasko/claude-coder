@@ -289,6 +289,23 @@ export class Controller {
     }
   }
 
+  /** Same plumbing as requestPermission, but no autoApprove/alwaysAllowed bypass — plan review is never silent. */
+  private async requestPlanApproval(plan: string): Promise<boolean> {
+    const id = ++this.permissionId;
+    const choicePromise = new Promise<PermissionChoice>((resolve) => {
+      this.permissionResolvers.set(id, resolve);
+    });
+    this.post({ type: 'permission', id, kind: 'plan', title: 'Plan ready — proceed with implementation?', detail: plan });
+    const choice = await choicePromise;
+    this.permissionResolvers.delete(id);
+    this.post({ type: 'permissionResolved', id, choice });
+    return choice !== 'no';
+  }
+
+  private requirePlanApproval(): boolean {
+    return this.config().get<boolean>('requirePlanApproval') ?? true;
+  }
+
   async resetPermissions(): Promise<void> {
     this.sessions.current.alwaysAllowed.clear();
     vscode.window.showInformationMessage('Claude Coder: "always allow" permissions cleared for the current chat.');
@@ -355,9 +372,16 @@ export class Controller {
 
       // Routing/classification runs on Haiku via credits; without a key we
       // just keep the current session going as-is.
-      const session = client ? await this.routePrompt(client, text) : this.sessions.current;
+      const { session, planApproved } = client
+        ? await this.routePrompt(client, text)
+        : { session: this.sessions.current, planApproved: true };
       this.ensureChatRecord(session, text);
       this.chatHistoryStore?.recordPrompt(session.id, text.length);
+
+      if (!planApproved) {
+        this.post({ type: 'turnDone', stopReason: 'cancelled' });
+        return;
+      }
 
       // First message of a session carries the dynamic context the frozen
       // system prompt must not contain (cache discipline). The plan drafted
@@ -649,12 +673,12 @@ export class Controller {
 
   // ---------- routing: task detection + complexity ----------
 
-  private async routePrompt(client: Anthropic, text: string) {
+  private async routePrompt(client: Anthropic, text: string): Promise<{ session: Session; planApproved: boolean }> {
     const autoDetect = this.config().get<boolean>('autoTaskDetection') ?? true;
     const session = this.sessions.current;
 
     if (!autoDetect) {
-      return session;
+      return { session, planApproved: true };
     }
 
     try {
@@ -689,19 +713,20 @@ export class Controller {
         });
         this.postSessionInfo();
         this.updateStatusBar();
-        await this.planIfNeeded(client, fresh, c.complexity, text);
-        return fresh;
+        const planApproved = await this.planIfNeeded(client, fresh, c.complexity, text);
+        return { session: fresh, planApproved };
       }
       if (session.turns === 0) {
         session.taskSummary = c.summary;
         session.effort = EFFORT_BY_COMPLEXITY[c.complexity];
-        await this.planIfNeeded(client, session, c.complexity, text);
+        const planApproved = await this.planIfNeeded(client, session, c.complexity, text);
+        return { session, planApproved };
       }
-      return session;
+      return { session, planApproved: true };
     } catch (e: any) {
       // Classifier failure must never block the user; log and fall through.
       this.log.appendLine(`[classifier error] ${e?.message ?? e}`);
-      return session;
+      return { session, planApproved: true };
     }
   }
 
@@ -713,14 +738,15 @@ export class Controller {
    * cheap, mechanical execution instead of a second round of expensive
    * output-token-heavy reasoning.
    */
-  private async planIfNeeded(client: Anthropic, session: Session, complexity: Complexity, text: string): Promise<void> {
+  /** Returns false if the user rejected the drafted plan — the caller must abort this turn. */
+  private async planIfNeeded(client: Anthropic, session: Session, complexity: Complexity, text: string): Promise<boolean> {
     if (complexity === 'trivial' || !this.planningEnabled()) {
-      return;
+      return true;
     }
     const ladder = this.planningModelLadder();
     const model = complexity === 'hard' ? ladder[1] ?? ladder[0] : ladder[0];
     if (!model) {
-      return;
+      return true;
     }
     try {
       const { plan, usage } = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens());
@@ -745,10 +771,21 @@ export class Controller {
           type: 'notice',
           text: `Plan drafted by ${displayName(model)} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
         });
+        // Escalation continuations (carryOver set) already got an explicit "escalate?" confirmation — don't ask twice.
+        if (session.carryOver === undefined && this.requirePlanApproval()) {
+          const approved = await this.requestPlanApproval(plan);
+          if (!approved) {
+            session.plan = undefined;
+            this.post({ type: 'notice', text: 'Plan rejected — send new instructions to draft another plan.' });
+            return false;
+          }
+        }
       }
+      return true;
     } catch (e: any) {
       // A missed plan must never block the user — Sonnet just implements without one.
       this.log.appendLine(`[planner error] ${e?.message ?? e}`);
+      return true;
     }
   }
 

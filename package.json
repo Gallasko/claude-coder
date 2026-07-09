@@ -110,6 +110,11 @@
           "default": true,
           "description": "Draft a short plan on the reasoning tier (Opus/Fable) before Sonnet implements it, for standard/hard tasks."
         },
+        "claudeCoder.requirePlanApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pause and ask for approval before implementing a drafted plan. Only applies when planningEnabled is on and a plan was drafted."
+        },
         "claudeCoder.planningModelLadder": {
           "type": "array",
           "items": {
