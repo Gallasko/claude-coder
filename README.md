@@ -10,6 +10,20 @@ A cost-aware Claude coding agent as a VS Code extension, talking to the Anthropi
 4. Set your key: `Ctrl+Shift+P` → **Claude Coder: Set API Key** (stored in VS Code secret storage; `ANTHROPIC_API_KEY` env var also works).
 5. Chat. The status bar (bottom right) shows the current model and running cost — click it for the full breakdown.
 
+## Install it as a real extension (`.vsix`)
+
+Use this to run Claude Coder in your normal VS Code windows, on any project, without the Extension Development Host.
+
+1. `npm install`
+2. Build the package: `npx vsce package` (or `npm run package`) — produces `claude-coder-<version>.vsix` in the repo root.
+3. Install it:
+   - CLI: `code --install-extension claude-coder-<version>.vsix`
+   - or in VS Code: Extensions view → `...` menu → **Install from VSIX...** → select the file.
+4. Reload/restart VS Code. Open any project, click the **Claude Coder** icon in the activity bar.
+5. Set your key: `Ctrl+Shift+P` → **Claude Coder: Set API Key** (or set `ANTHROPIC_API_KEY` in your environment).
+
+To update after making changes: bump `version` in `package.json`, rebuild the `.vsix`, then reinstall (add `--force` to `code --install-extension` to overwrite the existing version).
+
 ## How it saves tokens
 
 | Mechanism | Where | Effect |
