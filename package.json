@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -39,6 +39,10 @@
         "title": "Claude Coder: New Task (reset session)"
       },
       {
+        "command": "claudeCoder.setup",
+        "title": "Claude Coder: Setup (subscription or API key)"
+      },
+      {
         "command": "claudeCoder.setApiKey",
         "title": "Claude Coder: Set API Key"
       },
@@ -57,6 +61,14 @@
       {
         "command": "claudeCoder.showMemory",
         "title": "Claude Coder: Show Project Memory (recent changes)"
+      },
+      {
+        "command": "claudeCoder.addMemoryNote",
+        "title": "Claude Coder: Add Project Memory Note"
+      },
+      {
+        "command": "claudeCoder.showChatHistory",
+        "title": "Claude Coder: Show Chat History"
       },
       {
         "command": "claudeCoder.resetPermissions",

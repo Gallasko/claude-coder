@@ -143,6 +143,24 @@ body {
   color: var(--vscode-errorForeground);
 }
 
+.msg.setup {
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background, rgba(0, 0, 0, 0.1));
+}
+
+.setup-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.setup-detail {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+  margin-bottom: 4px;
+}
+
 .msg.working {
   display: flex;
   align-items: center;

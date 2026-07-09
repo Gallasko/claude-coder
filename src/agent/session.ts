@@ -28,6 +28,8 @@ export class Session {
   assistantLog: string[] = [];
   /** User prompts handled in this session, regardless of backend. */
   promptCount = 0;
+  /** "Always allow" permission grants — scoped to this chat only; a new session starts with none. */
+  alwaysAllowed: Set<string> = new Set();
 
   constructor(
     public model: string,

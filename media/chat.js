@@ -95,6 +95,7 @@
   }
 
   const SLASH_COMMANDS = [
+    { name: 'setup', desc: 'Set up subscription or API key' },
     { name: 'new', desc: 'Start a new task (reset session)' },
     { name: 'escalate', desc: 'Restart task on the next bigger model' },
     { name: 'costs', desc: 'Show session cost breakdown' },
@@ -160,6 +161,9 @@
   function runSlashCommand(name) {
     inputEl.value = '';
     switch (name) {
+      case 'setup':
+        vscode.postMessage({ type: 'runSetup' });
+        break;
       case 'new':
         vscode.postMessage({ type: 'newTask' });
         break;
@@ -352,6 +356,37 @@
       case 'notice':
         addMsg('notice', msg.text);
         break;
+      case 'setupNeeded': {
+        streamEl = null;
+        const card = document.createElement('div');
+        card.className = 'msg setup';
+
+        const title = document.createElement('div');
+        title.className = 'setup-title';
+        title.textContent = '🛠 ' + msg.title;
+        card.appendChild(title);
+
+        if (msg.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'setup-detail';
+          detail.textContent = msg.detail;
+          card.appendChild(detail);
+        }
+
+        const buttons = document.createElement('div');
+        buttons.className = 'perm-buttons';
+        const run = document.createElement('button');
+        run.textContent = 'Run setup';
+        run.addEventListener('click', () => {
+          vscode.postMessage({ type: 'runSetup' });
+        });
+        buttons.appendChild(run);
+        card.appendChild(buttons);
+
+        messagesEl.appendChild(card);
+        scrollDown();
+        break;
+      }
       case 'error':
         clearWorking();
         addMsg('notice error', msg.text);

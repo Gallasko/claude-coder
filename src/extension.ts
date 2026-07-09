@@ -12,11 +12,22 @@ export function activate(context: vscode.ExtensionContext): void {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.commands.registerCommand('claudeCoder.newTask', () => controller.newTask()),
+    vscode.commands.registerCommand('claudeCoder.setup', () => controller.runSetup()),
     vscode.commands.registerCommand('claudeCoder.setApiKey', () => controller.setApiKey()),
     vscode.commands.registerCommand('claudeCoder.escalate', () => controller.escalate()),
     vscode.commands.registerCommand('claudeCoder.showCosts', () => controller.showCosts()),
     vscode.commands.registerCommand('claudeCoder.showUsageHistory', () => controller.showUsageHistory()),
     vscode.commands.registerCommand('claudeCoder.showMemory', () => controller.showMemory()),
+    vscode.commands.registerCommand('claudeCoder.addMemoryNote', async () => {
+      const text = await vscode.window.showInputBox({
+        prompt: 'Memory note for this project',
+        placeHolder: 'e.g. Prefer named exports over default exports',
+      });
+      if (text) {
+        await controller.addMemoryNote(text);
+      }
+    }),
+    vscode.commands.registerCommand('claudeCoder.showChatHistory', () => controller.showChatHistory()),
     vscode.commands.registerCommand('claudeCoder.resetPermissions', () => controller.resetPermissions())
   );
 }

@@ -10,8 +10,19 @@ import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
 import { MemoryStore } from './agent/memory';
 import { runSubscriptionTurn, SubscriptionTurnResult } from './agent/sdkBackend';
+import { resetCliCache } from './agent/cliLocator';
+import {
+  creditsReady,
+  describeSetupGap,
+  detectSetup,
+  promptAndStoreApiKey,
+  runSetupWizard,
+  subscriptionReady,
+} from './setup';
 import { UsageStore, UsageRecord } from './agent/usageStore';
 import { UsagePanel } from './usage/panel';
+import { ChatHistoryStore } from './agent/chatHistoryStore';
+import { ChatHistoryPanel } from './history/panel';
 import {
   CLASSIFIER_MODEL,
   Complexity,
@@ -30,8 +41,6 @@ export interface UiSink {
 }
 
 type PermissionChoice = 'yes' | 'always' | 'no';
-
-const ALLOWED_STORE_KEY = 'claudeCoder.alwaysAllowed';
 
 export class Controller {
   private client: Anthropic | undefined;
@@ -53,28 +62,37 @@ export class Controller {
 
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
   private permissionId = 0;
-  private alwaysAllowed: Set<string>;
   private memory: MemoryStore | undefined;
   /** Persistent, cross-workspace usage/billing history — see usageStore.ts. */
   private usageStore: UsageStore | undefined;
   private readonly usageStoreReady: Promise<UsageStore>;
+  /** Persistent, cross-workspace chat history (cost/length/duration per chat) — see chatHistoryStore.ts. */
+  private chatHistoryStore: ChatHistoryStore | undefined;
+  private readonly chatHistoryStoreReady: Promise<ChatHistoryStore>;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
     this.sessions.current.backend = this.defaultBackend();
-    this.alwaysAllowed = new Set(context.workspaceState.get<string[]>(ALLOWED_STORE_KEY, []));
     this.log = vscode.window.createOutputChannel('Claude Coder');
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = 'claudeCoder.showCosts';
     this.updateStatusBar();
     this.statusBar.show();
     this.usageStoreReady = this.initUsageStore();
+    this.chatHistoryStoreReady = this.initChatHistoryStore();
   }
 
   private async initUsageStore(): Promise<UsageStore> {
     const dir = this.context.globalStorageUri.fsPath;
     const store = await UsageStore.load(path.join(dir, 'usage-history.json'));
     this.usageStore = store;
+    return store;
+  }
+
+  private async initChatHistoryStore(): Promise<ChatHistoryStore> {
+    const dir = this.context.globalStorageUri.fsPath;
+    const store = await ChatHistoryStore.load(path.join(dir, 'chat-history.json'));
+    this.chatHistoryStore = store;
     return store;
   }
 
@@ -102,9 +120,15 @@ export class Controller {
     UsagePanel.show(store);
   }
 
+  async showChatHistory(): Promise<void> {
+    const store = await this.chatHistoryStoreReady;
+    ChatHistoryPanel.show(store, this.tryWorkspaceRoot());
+  }
+
   attachUi(ui: UiSink): void {
     this.ui = ui;
     this.postSessionInfo();
+    void this.offerSetupIfNeeded();
   }
 
   private config() {
@@ -163,29 +187,63 @@ export class Controller {
     this.ui?.post(message);
   }
 
-  // ---------- API key ----------
+  // ---------- setup & API key ----------
 
   async setApiKey(): Promise<void> {
-    const key = await vscode.window.showInputBox({
-      prompt: 'Anthropic API key (stored in VS Code secret storage)',
-      password: true,
-      ignoreFocusOut: true,
-    });
-    if (key) {
-      await this.context.secrets.store('claudeCoder.apiKey', key.trim());
+    if (await promptAndStoreApiKey(this.context)) {
       this.client = undefined;
-      vscode.window.showInformationMessage('Claude Coder: API key saved.');
     }
   }
 
-  private async getClient(): Promise<Anthropic> {
+  /** Walk the user through subscription/API-key setup, then refresh caches. */
+  async runSetup(): Promise<void> {
+    const summary = await runSetupWizard(this.context);
+    if (!summary) {
+      this.post({ type: 'notice', text: 'Setup cancelled — rerun it any time with /setup or "Claude Coder: Setup".' });
+      return;
+    }
+    this.client = undefined;
+    resetCliCache();
+    if (!this.busy) {
+      this.sessions.current.backend = this.defaultBackend();
+    }
+    this.post({ type: 'notice', text: summary });
+    this.postSessionInfo();
+    this.updateStatusBar();
+  }
+
+  /** Chat card that opens the setup wizard. */
+  private postSetupCard(title: string, detail: string): void {
+    this.post({ type: 'setupNeeded', title, detail });
+  }
+
+  /** On first open (or after a broken config) greet the user with the wizard. */
+  private async offerSetupIfNeeded(): Promise<void> {
+    try {
+      const state = await detectSetup(this.context);
+      const ready = this.useSubscription()
+        ? subscriptionReady(state) || creditsReady(state)
+        : creditsReady(state);
+      if (!ready) {
+        this.postSetupCard(
+          'Welcome to Claude Coder — finish setting up',
+          `${describeSetupGap(state)}\n\nRun the setup to use your Claude Pro/Max subscription or an Anthropic API key.`
+        );
+      }
+    } catch (e: any) {
+      this.log.appendLine(`[setup detect error] ${e?.message ?? e}`);
+    }
+  }
+
+  /** The API client, or undefined when no key is configured (subscription-only). */
+  private async tryGetClient(): Promise<Anthropic | undefined> {
     if (this.client) {
       return this.client;
     }
     const stored = await this.context.secrets.get('claudeCoder.apiKey');
     const key = stored || process.env.ANTHROPIC_API_KEY;
     if (!key) {
-      throw new Error('No API key. Run "Claude Coder: Set API Key" or export ANTHROPIC_API_KEY.');
+      return undefined;
     }
     this.client = new Anthropic({ apiKey: key });
     return this.client;
@@ -193,11 +251,17 @@ export class Controller {
 
   // ---------- permissions (rendered in the chat, not modal dialogs) ----------
 
+  /**
+   * "Always allow" grants are scoped to the current chat (Session), not the
+   * workspace — a new task, escalation, or task switch starts a fresh
+   * Session with no grants, so permissions never leak between chats.
+   */
   private async requestPermission(req: PermissionRequest): Promise<boolean> {
     if (req.kind === 'command' && this.config().get<boolean>('autoApproveCommands')) {
       return true;
     }
-    if (this.alwaysAllowed.has(req.key)) {
+    const session = this.sessions.current;
+    if (session.alwaysAllowed.has(req.key)) {
       return true;
     }
     const id = ++this.permissionId;
@@ -209,9 +273,8 @@ export class Controller {
     this.permissionResolvers.delete(id);
     this.post({ type: 'permissionResolved', id, choice });
     if (choice === 'always') {
-      this.alwaysAllowed.add(req.key);
-      await this.context.workspaceState.update(ALLOWED_STORE_KEY, [...this.alwaysAllowed]);
-      this.log.appendLine(`[perm] always-allow "${req.key}"`);
+      session.alwaysAllowed.add(req.key);
+      this.log.appendLine(`[perm] always-allow "${req.key}" (chat #${session.id})`);
       return true;
     }
     this.log.appendLine(`[perm] ${choice} "${req.key}"`);
@@ -227,9 +290,8 @@ export class Controller {
   }
 
   async resetPermissions(): Promise<void> {
-    this.alwaysAllowed.clear();
-    await this.context.workspaceState.update(ALLOWED_STORE_KEY, []);
-    vscode.window.showInformationMessage('Claude Coder: all "always allow" permissions cleared.');
+    this.sessions.current.alwaysAllowed.clear();
+    vscode.window.showInformationMessage('Claude Coder: "always allow" permissions cleared for the current chat.');
   }
 
   // ---------- main entry: user sent a prompt ----------
@@ -243,13 +305,24 @@ export class Controller {
     this.abort = new AbortController();
     this.post({ type: 'accepted' });
     try {
-      const client = await this.getClient();
       const memory = await this.ensureMemory();
+      const client = await this.tryGetClient();
+
+      // Without an API key the extension can still run subscription tasks —
+      // only the credits backend and the Haiku/Opus utility calls need one.
+      if (!client && this.sessions.current.backend !== 'subscription') {
+        this.postSetupCard(
+          'Claude Coder needs setup',
+          'No Anthropic API key is configured and the subscription backend is turned off, so there is nothing to run this task on.'
+        );
+        this.post({ type: 'turnDone', stopReason: 'error' });
+        return;
+      }
 
       // Long, prose-heavy prompts (pasted logs, specs) get shrunk by Haiku
       // before they ever reach the expensive model. Opt-in: this rewrites
       // the user's own words, so it's off by default.
-      if (this.compressLongPrompts() && text.length > this.compressionThresholdChars()) {
+      if (client && this.compressLongPrompts() && text.length > this.compressionThresholdChars()) {
         try {
           const before = this.snapshotTotals(this.classifierTotals);
           const { text: compressed, usage } = await compressPrompt(
@@ -280,7 +353,11 @@ export class Controller {
         }
       }
 
-      const session = await this.routePrompt(client, text);
+      // Routing/classification runs on Haiku via credits; without a key we
+      // just keep the current session going as-is.
+      const session = client ? await this.routePrompt(client, text) : this.sessions.current;
+      this.ensureChatRecord(session, text);
+      this.chatHistoryStore?.recordPrompt(session.id, text.length);
 
       // First message of a session carries the dynamic context the frozen
       // system prompt must not contain (cache discipline). The plan drafted
@@ -322,9 +399,18 @@ export class Controller {
                 type: 'notice',
                 text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
               });
-              void this.offerEscalation(
-                `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
-              );
+              if (looksLikeAuthProblem(result.errorText)) {
+                // Logged out / expired credentials — send the user to setup
+                // instead of offering a paid escalation.
+                this.postSetupCard(
+                  'Claude Code login problem',
+                  `The subscription run failed with: ${result.errorText}\n\nRun the setup to log in to Claude Code again, or switch to API credits.`
+                );
+              } else if (client) {
+                void this.offerEscalation(
+                  `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
+                );
+              }
             }
             return;
           }
@@ -332,9 +418,20 @@ export class Controller {
           if (e?.message === 'cancelled' || e?.name === 'AbortError' || this.abort?.signal.aborted) {
             throw e;
           }
-          // Could be a real setup problem (CLI missing/not logged in) or just
-          // a transient connection hiccup. Ask before spending credits instead
-          // of silently switching billing.
+          if (e?.setupNeeded) {
+            // Definite setup problem (CLI missing) — retrying or burning
+            // credits won't fix it; open the guided setup instead.
+            this.log.appendLine(`[sub setup needed] ${e.message}`);
+            this.postSetupCard(
+              'Claude subscription not available',
+              `${e.message}\n\nRun the setup to install Claude Code and log in, or switch to API credits.`
+            );
+            this.post({ type: 'turnDone', stopReason: 'error' });
+            return;
+          }
+          // Could be a real setup problem (not logged in) or just a transient
+          // connection hiccup. Ask before spending credits instead of
+          // silently switching billing.
           this.log.appendLine(`[sub error] ${e?.stack ?? e}`);
           const reason = e?.message ?? String(e);
           const retry = await this.requestPermission({
@@ -369,7 +466,7 @@ export class Controller {
               type: 'notice',
               text:
                 'Falling back to API credits for this task. ' +
-                'To use your Pro/Max plan, install Claude Code and log in (`claude` → /login), then start a new task.',
+                'To use your Pro/Max plan again, run /setup (or "Claude Coder: Setup"), then start a new task.',
             });
           }
           session.backend = 'credits';
@@ -377,11 +474,25 @@ export class Controller {
       }
 
       // ---- credits backend (direct API) ----
+      if (!client) {
+        // We only get here without a client via a subscription fallback —
+        // and falling back needs an API key that doesn't exist.
+        this.postSetupCard(
+          'API key needed to fall back to credits',
+          'The subscription run can\'t continue (unavailable or over its limit) and no Anthropic API key is configured to fall back on. Run the setup to fix the subscription login or add a key.'
+        );
+        this.post({ type: 'turnDone', stopReason: 'error' });
+        return;
+      }
       const toolCtx = this.buildToolContext(session, memory);
       const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
 
+      let assistantCharsThisTurn = 0;
       const result = await runTurn(client, session, content, toolCtx, maxTokens, {
-        onText: (delta) => this.post({ type: 'delta', text: delta }),
+        onText: (delta) => {
+          assistantCharsThisTurn += delta.length;
+          this.post({ type: 'delta', text: delta });
+        },
         onToolUse: (name, input) =>
           this.post({ type: 'toolUse', name, detail: previewInput(name, input) }),
         onToolResult: (name, ok, preview) => this.post({ type: 'toolResult', name, ok, preview }),
@@ -405,6 +516,14 @@ export class Controller {
             cacheWriteTokens: totals.cacheWriteTokens,
             costUsd: costUsd(totals, session.model),
           });
+          this.chatHistoryStore?.addUsage(session.id, {
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            cacheReadTokens: totals.cacheReadTokens,
+            cacheWriteTokens: totals.cacheWriteTokens,
+            costUsd: costUsd(totals, session.model),
+            assistantChars: 0,
+          });
           this.updateStatusBar();
           this.postSessionInfo();
         },
@@ -413,6 +532,14 @@ export class Controller {
         onThinking: (delta) => this.post({ type: 'thinking', text: delta }),
       }, this.abort.signal, minimize);
 
+      this.chatHistoryStore?.addUsage(session.id, {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 0,
+        assistantChars: assistantCharsThisTurn,
+      });
       this.post({ type: 'turnDone', stopReason: result.stopReason });
       this.postSessionInfo();
       if (this.autoCompact()) {
@@ -487,6 +614,14 @@ export class Controller {
       cacheReadTokens: result.usage.cacheReadTokens,
       cacheWriteTokens: result.usage.cacheWriteTokens,
       costUsd: result.estValueUsd,
+    });
+    this.chatHistoryStore?.addUsage(session.id, {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cacheReadTokens: result.usage.cacheReadTokens,
+      cacheWriteTokens: result.usage.cacheWriteTokens,
+      costUsd: result.estValueUsd,
+      assistantChars: result.finalText?.length ?? 0,
     });
     this.log.appendLine(
       `[sub] session=#${session.id} sdk=${result.sdkSessionId ?? '?'} turns=${result.numTurns} ` +
@@ -695,14 +830,24 @@ export class Controller {
 
   async showMemory(): Promise<void> {
     const memory = await this.ensureMemory();
+    const notes = memory.listNotes(20);
     const changes = memory.recentChanges(20);
-    const lines =
-      changes.length === 0
-        ? ['No recorded changes yet.']
-        : changes.map(
-            (c) => `${new Date(c.timestamp).toLocaleString()}  ${c.tool}  ${c.path}  (${c.taskSummary || 'unknown task'})`
-          );
-    vscode.window.showInformationMessage(lines.join('\n'), { modal: true });
+    const noteLines = notes.map((n) => `${new Date(n.createdAt).toLocaleString()}  note  ${n.text}`);
+    const changeLines = changes.map(
+      (c) => `${new Date(c.timestamp).toLocaleString()}  ${c.tool}  ${c.path}  (${c.taskSummary || 'unknown task'})`
+    );
+    const lines = [...noteLines, ...changeLines];
+    vscode.window.showInformationMessage(
+      lines.length === 0 ? 'No project memory yet.' : lines.join('\n'),
+      { modal: true }
+    );
+  }
+
+  /** Manual, freeform memory note for the current project (see MemoryStore.addNote). */
+  async addMemoryNote(text: string): Promise<void> {
+    const memory = await this.ensureMemory();
+    memory.addNote(text);
+    vscode.window.showInformationMessage('Memory note saved for this project.');
   }
 
   // ---------- helpers ----------
@@ -762,6 +907,30 @@ export class Controller {
       throw new Error('Open a folder first — Claude Coder needs a workspace.');
     }
     return folder.uri.fsPath;
+  }
+
+  private tryWorkspaceRoot(): string | undefined {
+    try {
+      return this.workspaceRoot();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Lazily creates the chat-history record for a session's id (no-op after the first call). */
+  private ensureChatRecord(session: Session, promptText: string): void {
+    if (!this.chatHistoryStore) {
+      return;
+    }
+    const root = this.tryWorkspaceRoot();
+    this.chatHistoryStore.ensure(session.id, {
+      projectPath: root ?? 'unknown',
+      projectName: root ? path.basename(root) : 'unknown',
+      title: (session.taskSummary || promptText).slice(0, 80),
+      model: session.backend === 'subscription' ? this.subscriptionModel() : session.model,
+      backend: session.backend,
+      createdAt: Date.now(),
+    });
   }
 
   private warnIfContextLarge(inputTokens: number): void {
@@ -889,6 +1058,20 @@ function isUsageLimitOrModelError(errorText: string | undefined): boolean {
   );
 }
 
+/**
+ * Subscription-side failures that mean the Claude Code login itself is broken
+ * (logged out, expired OAuth) — the fix is the setup wizard, not a retry or
+ * an escalation to credits.
+ */
+function looksLikeAuthProblem(errorText: string | undefined): boolean {
+  if (!errorText) {
+    return false;
+  }
+  return /\/login|log ?in|logged out|authentication|unauthorized|401|invalid api key|oauth|credential/i.test(
+    errorText
+  );
+}
+
 function summarizePlan(plan: string, maxLines = 3, maxChars = 220): string {
   const lines = plan
     .split('\n')
@@ -926,7 +1109,7 @@ function previewInput(name: string, input: any): string {
 
 function describeError(e: any): string {
   if (e instanceof Anthropic.AuthenticationError) {
-    return 'Invalid API key. Run "Claude Coder: Set API Key".';
+    return 'Invalid API key. Run /setup (or "Claude Coder: Set API Key") to fix it.';
   }
   if (e instanceof Anthropic.RateLimitError) {
     return 'Rate limited by the API. Wait a moment and retry.';

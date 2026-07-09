@@ -1,9 +1,9 @@
 import * as path from 'path';
-import { execFile } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, Options, PermissionResult, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionRequest } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
+import { findClaudeCli, SetupNeededError } from './cliLocator';
 
 /**
  * Subscription backend: runs the task through the Claude Agent SDK, which
@@ -52,30 +52,19 @@ const PROGRESS_INTERVAL_MS = 300;
 const CHARS_PER_TOKEN = 4;
 const DENY_MESSAGE = 'The user denied permission for this action. Adjust your approach or ask them.';
 
-let cachedClaudeExecutable: string | undefined;
-
 /**
  * The SDK's built-in CLI resolution breaks once we bundle the extension, so
  * we point it at the user's installed Claude Code binary — which must exist
  * anyway, since it holds the subscription login this backend runs on.
  */
 async function findClaudeExecutable(): Promise<string> {
-  if (cachedClaudeExecutable) {
-    return cachedClaudeExecutable;
-  }
-  const found = await new Promise<string | undefined>((resolve) => {
-    execFile(
-      process.platform === 'win32' ? 'where' : 'which',
-      ['claude'],
-      (error, stdout) => resolve(error ? undefined : stdout.split('\n')[0]?.trim() || undefined)
-    );
-  });
+  const found = await findClaudeCli();
   if (!found) {
-    throw new Error(
-      'Claude Code CLI not found on PATH. Install it and log in (`claude` → /login) to use the subscription backend.'
+    throw new SetupNeededError(
+      'Claude Code CLI not found on this machine — it holds the subscription login this backend runs on.',
+      'cli-missing'
     );
   }
-  cachedClaudeExecutable = found;
   return found;
 }
 
