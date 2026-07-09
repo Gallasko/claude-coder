@@ -4,6 +4,7 @@ import type { CanUseTool, Options, PermissionResult, SDKMessage } from '@anthrop
 import type { PermissionRequest } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
+import { supportsAdaptiveThinking } from './models';
 
 /**
  * Subscription backend: runs the task through the Claude Agent SDK, which
@@ -120,6 +121,14 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
         ? SUBSCRIPTION_SYSTEM_APPEND + MINIMAL_OUTPUT_ADDENDUM
         : SUBSCRIPTION_SYSTEM_APPEND,
     },
+    // Force summarized display so thinking_delta events carry real text —
+    // without this the CLI's own default can leave `thinking` empty (only
+    // `estimated_tokens` ticks up), so the thinking box renders with nothing
+    // written in it. Thinking is still billed as part of the plan's usage,
+    // so (unlike credits) we don't skip it under minimizeOutput.
+    ...(supportsAdaptiveThinking(p.model)
+      ? { thinking: { type: 'adaptive' as const, display: 'summarized' as const } }
+      : {}),
     ...(p.resumeSessionId ? { resume: p.resumeSessionId } : {}),
   };
 
