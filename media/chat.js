@@ -17,6 +17,9 @@
   let streamEl = null;
   /** The ephemeral "working…" indicator shown while a turn runs. */
   let workingEl = null;
+  /** The collapsible "thinking" block for the current turn, if any. */
+  let thinkingEl = null;
+  let thinkingBodyEl = null;
 
   function fmtTok(n) {
     return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
@@ -44,6 +47,51 @@
       workingEl.remove();
       workingEl = null;
     }
+  }
+
+  function ensureThinking() {
+    if (!thinkingEl) {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'msg thinking';
+
+      const header = document.createElement('div');
+      header.className = 'thinking-header';
+      const toggle = document.createElement('button');
+      toggle.className = 'thinking-toggle';
+      toggle.textContent = 'Show thinking';
+      const label = document.createElement('span');
+      label.className = 'thinking-label';
+      label.textContent = '🧠 Thinking…';
+      header.appendChild(label);
+      header.appendChild(toggle);
+
+      thinkingBodyEl = document.createElement('pre');
+      thinkingBodyEl.className = 'thinking-body hidden';
+
+      toggle.addEventListener('click', () => {
+        const hidden = thinkingBodyEl.classList.toggle('hidden');
+        toggle.textContent = hidden ? 'Show thinking' : 'Hide thinking';
+      });
+
+      thinkingEl.appendChild(header);
+      thinkingEl.appendChild(thinkingBodyEl);
+      messagesEl.appendChild(thinkingEl);
+    }
+    return thinkingEl;
+  }
+
+  function appendThinking(text) {
+    ensureThinking();
+    thinkingBodyEl.textContent += text;
+    if (workingEl) {
+      messagesEl.appendChild(workingEl); // stay pinned below
+    }
+    scrollDown();
+  }
+
+  function clearThinking() {
+    thinkingEl = null;
+    thinkingBodyEl = null;
   }
 
   const SLASH_COMMANDS = [
@@ -172,7 +220,9 @@
     addMsg('user', text);
     inputEl.value = '';
     streamEl = null;
+    clearThinking();
     setBusy(true);
+    updateWorking('sending', 0);
     vscode.postMessage({ type: 'send', text });
   }
 
@@ -230,6 +280,12 @@
         break;
       case 'working':
         updateWorking(msg.phase, msg.tokens);
+        break;
+      case 'thinking':
+        appendThinking(msg.text);
+        break;
+      case 'accepted':
+        updateWorking('accepted', 0);
         break;
       case 'toolUse':
         streamEl = null;
@@ -308,6 +364,7 @@
       case 'turnDone':
         clearWorking();
         streamEl = null;
+        clearThinking();
         setBusy(false);
         break;
       case 'sessionInfo':

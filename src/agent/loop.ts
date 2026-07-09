@@ -12,6 +12,8 @@ export interface TurnEvents {
   onNotice: (message: string) => void;
   /** Live activity signal: current phase + approximate output tokens this turn. */
   onProgress: (phase: string, approxTokens: number) => void;
+  /** Extended-thinking text as it streams in (summarized display). Optional: not all backends emit it. */
+  onThinking?: (delta: string) => void;
 }
 
 export interface TurnResult {
@@ -174,6 +176,7 @@ async function streamOnce(
       const d = event.delta;
       if (d?.type === 'thinking_delta') {
         progress('thinking', (d.thinking ?? '').length);
+        events.onThinking?.(d.thinking ?? '');
       } else if (d?.type === 'text_delta') {
         progress('writing', (d.text ?? '').length);
       } else if (d?.type === 'input_json_delta') {

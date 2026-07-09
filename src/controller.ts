@@ -241,6 +241,7 @@ export class Controller {
     }
     this.busy = true;
     this.abort = new AbortController();
+    this.post({ type: 'accepted' });
     try {
       const client = await this.getClient();
       const memory = await this.ensureMemory();
@@ -409,6 +410,7 @@ export class Controller {
         },
         onNotice: (msg) => this.post({ type: 'notice', text: msg }),
         onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
+        onThinking: (delta) => this.post({ type: 'thinking', text: delta }),
       }, this.abort.signal, minimize);
 
       this.post({ type: 'turnDone', stopReason: result.stopReason });
@@ -463,6 +465,7 @@ export class Controller {
       onToolUse: (name, detail) => this.post({ type: 'toolUse', name, detail }),
       onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
       onNotice: (msg) => this.post({ type: 'notice', text: msg }),
+      onThinking: (delta) => this.post({ type: 'thinking', text: delta }),
     });
     session.sdkSessionId = result.sdkSessionId ?? session.sdkSessionId;
     if (result.finalText) {

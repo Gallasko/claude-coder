@@ -44,6 +44,8 @@ export interface SubscriptionTurnParams {
   onToolUse: (name: string, detail: string) => void;
   onProgress: (phase: string, approxTokens: number) => void;
   onNotice: (message: string) => void;
+  /** Extended-thinking text as it streams in, when the SDK surfaces it. */
+  onThinking?: (delta: string) => void;
 }
 
 const PROGRESS_INTERVAL_MS = 300;
@@ -163,6 +165,9 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
             }
           } else if (d?.type === 'thinking_delta') {
             progress('thinking', (d.thinking ?? '').length);
+            if (!fromSubagent) {
+              p.onThinking?.(d.thinking ?? '');
+            }
           } else if (d?.type === 'input_json_delta') {
             progress('preparing tool call', (d.partial_json ?? '').length);
           }
