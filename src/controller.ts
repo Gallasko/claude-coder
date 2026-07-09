@@ -28,7 +28,7 @@ import { UsagePanel } from './usage/panel';
 import { ChatHistoryStore } from './agent/chatHistoryStore';
 import { ProjectStore } from './agent/projectStore';
 import { SummaryStore, SummaryRecord } from './agent/summaryStore';
-import { summarizeSession, findRelevantChats } from './agent/summarizer';
+import { summarizeSession, findRelevantChats, summarizeCommitMessage } from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
 import {
   CLASSIFIER_MODEL,
@@ -365,7 +365,7 @@ export class Controller {
     }
 
     await execFileAsync('git', ['add', '-A'], { cwd: root });
-    const commitMessage = message.trim() || (await this.defaultCommitMessage(root));
+    const commitMessage = message.trim() || (await this.summarizedCommitMessage(root));
 
     try {
       await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
@@ -375,7 +375,41 @@ export class Controller {
     }
   }
 
-  /** Falls back to a message built from staged file names when the user didn't give one. */
+  /**
+   * Default commit message when the user didn't supply one: a cheap Haiku
+   * call summarizes the current chat session's transcript into a commit
+   * message. Falls back to a message built from staged file names if there's
+   * no client available or the summary call fails.
+   */
+  private async summarizedCommitMessage(root: string): Promise<string> {
+    const session = this.sessions.current;
+    try {
+      const client = await this.tryGetClient();
+      if (!client || session.turns === 0) {
+        return await this.defaultCommitMessage(root);
+      }
+      const before = this.snapshotTotals(this.classifierTotals);
+      const message = await summarizeCommitMessage(client, session, this.classifierTotals);
+      const delta = this.deltaTotals(before, this.classifierTotals);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind: 'summarize',
+        sessionId: session.id,
+        inputTokens: delta.inputTokens,
+        outputTokens: delta.outputTokens,
+        cacheReadTokens: delta.cacheReadTokens,
+        cacheWriteTokens: delta.cacheWriteTokens,
+        costUsd: costUsd(delta, CLASSIFIER_MODEL),
+      });
+      return message || (await this.defaultCommitMessage(root));
+    } catch (e: any) {
+      this.log.appendLine(`[commit summarize error] ${e?.message ?? e}`);
+      return await this.defaultCommitMessage(root);
+    }
+  }
+
+  /** Falls back to a message built from staged file names when no summary is available. */
   private async defaultCommitMessage(root: string): Promise<string> {
     const { stdout } = await execFileAsync('git', ['diff', '--cached', '--name-only'], { cwd: root });
     const files = stdout.trim().split('\n').filter(Boolean);

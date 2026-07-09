@@ -62,6 +62,56 @@ export async function summarizeSession(
   return JSON.parse(text.text) as ChatSummary;
 }
 
+const COMMIT_MESSAGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    message: {
+      type: 'string',
+      description:
+        'A git commit message: an imperative-mood subject line (max ~72 chars) summarizing the change made in this chat, ' +
+        'optionally followed by a blank line and a short body for non-obvious context.',
+    },
+  },
+  required: ['message'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call that turns the current session's transcript into a git
+ * commit message — used by /commit when the user doesn't supply one.
+ */
+export async function summarizeCommitMessage(client: Anthropic, session: Session, totals: UsageTotals): Promise<string> {
+  const transcript = buildTranscript(session).slice(-8000);
+  if (!transcript.trim()) {
+    throw new Error('no transcript to summarize');
+  }
+  const response = await client.messages.create({
+    model: CLASSIFIER_MODEL,
+    max_tokens: 200,
+    output_config: { format: { type: 'json_schema', schema: COMMIT_MESSAGE_SCHEMA as any } },
+    messages: [
+      {
+        role: 'user',
+        content: [
+          'Write a git commit message for the change made in this coding-agent chat session.',
+          session.taskSummary ? `Task: ${session.taskSummary}` : '',
+          `Transcript excerpt (most recent last):\n"""${transcript}"""`,
+          '',
+          'Focus on what changed and why, not the conversation itself.',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      },
+    ],
+  });
+  addUsage(totals, response.usage);
+  const text = response.content.find((b) => b.type === 'text');
+  if (!text || text.type !== 'text') {
+    throw new Error('summarizer returned no text');
+  }
+  return (JSON.parse(text.text) as { message: string }).message.trim();
+}
+
 export interface ChatCandidate {
   chatId: number;
   summary: string;
