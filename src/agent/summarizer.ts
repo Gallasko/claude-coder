@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { Session, extractText } from './session';
-import { CLASSIFIER_MODEL, UsageTotals, addUsage } from './models';
+import { runHaikuTask, HaikuTaskResult } from './sdkBackend';
 
 export interface ChatSummary {
   summary: string;
@@ -21,45 +21,40 @@ const SCHEMA = {
   additionalProperties: false,
 } as const;
 
+export type SummaryTaskResult<T> = HaikuTaskResult & { data: T };
+
 /**
- * Cheap end-of-task Haiku call that turns a finished session's transcript
- * into a durable summary — stored in SummaryStore as the chat's "memory"
- * for the project history view.
+ * Cheap end-of-task Haiku call (subscription-first, credits fallback — see
+ * sdkBackend.ts runHaikuTask) that turns a finished session's transcript
+ * into a durable summary — stored in SummaryStore as the chat's "memory" for
+ * the project history view.
  */
 export async function summarizeSession(
-  client: Anthropic,
-  session: Session,
-  totals: UsageTotals
-): Promise<ChatSummary> {
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  session: Session
+): Promise<SummaryTaskResult<ChatSummary>> {
   const transcript = buildTranscript(session).slice(-8000);
   if (!transcript.trim()) {
-    return { summary: session.taskSummary || '(no activity)', highlights: [] };
+    const data = { summary: session.taskSummary || '(no activity)', highlights: [] };
+    return { data, text: '', structured: data, backend: 'credits', usage: emptyUsage(), estValueUsd: 0 };
   }
-  const response = await client.messages.create({
-    model: CLASSIFIER_MODEL,
-    max_tokens: 400,
-    output_config: { format: { type: 'json_schema', schema: SCHEMA as any } },
-    messages: [
-      {
-        role: 'user',
-        content: [
-          'Summarize this finished coding-agent chat session for a project history log.',
-          session.taskSummary ? `Task: ${session.taskSummary}` : '',
-          `Transcript excerpt (most recent last):\n"""${transcript}"""`,
-          '',
-          'Write a concise summary of what was accomplished (or attempted) and list key highlights.',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      },
-    ],
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: SCHEMA,
+    maxTokens: 400,
+    prompt: [
+      'Summarize this finished coding-agent chat session for a project history log.',
+      session.taskSummary ? `Task: ${session.taskSummary}` : '',
+      `Transcript excerpt (most recent last):\n"""${transcript}"""`,
+      '',
+      'Write a concise summary of what was accomplished (or attempted) and list key highlights.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
   });
-  addUsage(totals, response.usage);
-  const text = response.content.find((b) => b.type === 'text');
-  if (!text || text.type !== 'text') {
-    throw new Error('summarizer returned no text');
-  }
-  return JSON.parse(text.text) as ChatSummary;
+  return { ...result, data: (result.structured ?? JSON.parse(result.text)) as ChatSummary };
 }
 
 const COMMIT_MESSAGE_SCHEMA = {
@@ -77,39 +72,36 @@ const COMMIT_MESSAGE_SCHEMA = {
 } as const;
 
 /**
- * Cheap Haiku call that turns the current session's transcript into a git
- * commit message — used by /commit when the user doesn't supply one.
+ * Cheap Haiku call (subscription-first, credits fallback) that turns the
+ * current session's transcript into a git commit message — used by /commit
+ * when the user doesn't supply one.
  */
-export async function summarizeCommitMessage(client: Anthropic, session: Session, totals: UsageTotals): Promise<string> {
+export async function summarizeCommitMessage(
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  session: Session
+): Promise<SummaryTaskResult<string>> {
   const transcript = buildTranscript(session).slice(-8000);
   if (!transcript.trim()) {
     throw new Error('no transcript to summarize');
   }
-  const response = await client.messages.create({
-    model: CLASSIFIER_MODEL,
-    max_tokens: 200,
-    output_config: { format: { type: 'json_schema', schema: COMMIT_MESSAGE_SCHEMA as any } },
-    messages: [
-      {
-        role: 'user',
-        content: [
-          'Write a git commit message for the change made in this coding-agent chat session.',
-          session.taskSummary ? `Task: ${session.taskSummary}` : '',
-          `Transcript excerpt (most recent last):\n"""${transcript}"""`,
-          '',
-          'Focus on what changed and why, not the conversation itself.',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      },
-    ],
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: COMMIT_MESSAGE_SCHEMA,
+    maxTokens: 200,
+    prompt: [
+      'Write a git commit message for the change made in this coding-agent chat session.',
+      session.taskSummary ? `Task: ${session.taskSummary}` : '',
+      `Transcript excerpt (most recent last):\n"""${transcript}"""`,
+      '',
+      'Focus on what changed and why, not the conversation itself.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
   });
-  addUsage(totals, response.usage);
-  const text = response.content.find((b) => b.type === 'text');
-  if (!text || text.type !== 'text') {
-    throw new Error('summarizer returned no text');
-  }
-  return (JSON.parse(text.text) as { message: string }).message.trim();
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { message: string };
+  return { ...result, data: parsed.message.trim() };
 }
 
 export interface ChatCandidate {
@@ -132,46 +124,37 @@ const RECALL_SCHEMA = {
 } as const;
 
 /**
- * Cheap Haiku call that picks which past chats in a project (if any) are
- * relevant to a new task — so a fresh chat can reuse the right memories
- * instead of just the most recent ones.
+ * Cheap Haiku call (subscription-first, credits fallback) that picks which
+ * past chats in a project (if any) are relevant to a new task — so a fresh
+ * chat can reuse the right memories instead of just the most recent ones.
  */
 export async function findRelevantChats(
-  client: Anthropic,
-  totals: UsageTotals,
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
   upcomingTask: string,
   candidates: ChatCandidate[],
   limit = 5
-): Promise<number[]> {
+): Promise<SummaryTaskResult<number[]>> {
   if (candidates.length === 0) {
-    return [];
+    return { data: [], text: '', structured: [], backend: 'credits', usage: emptyUsage(), estValueUsd: 0 };
   }
   const list = candidates
     .map((c) => `#${c.chatId}: ${c.summary}${c.highlights.length ? ` (${c.highlights.join('; ')})` : ''}`)
     .join('\n');
-  const response = await client.messages.create({
-    model: CLASSIFIER_MODEL,
-    max_tokens: 200,
-    output_config: { format: { type: 'json_schema', schema: RECALL_SCHEMA as any } },
-    messages: [
-      {
-        role: 'user',
-        content: [
-          'A new chat is starting in this project. Decide which past chats, if any, are directly relevant or helpful for it.',
-          `Upcoming task:\n"""${upcomingTask.slice(0, 2000)}"""`,
-          `Past chats in this project:\n${list}`,
-          `Return at most ${limit} chat IDs, most relevant first. Return an empty array if none are clearly helpful — don't force irrelevant matches.`,
-        ].join('\n\n'),
-      },
-    ],
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: RECALL_SCHEMA,
+    maxTokens: 200,
+    prompt: [
+      'A new chat is starting in this project. Decide which past chats, if any, are directly relevant or helpful for it.',
+      `Upcoming task:\n"""${upcomingTask.slice(0, 2000)}"""`,
+      `Past chats in this project:\n${list}`,
+      `Return at most ${limit} chat IDs, most relevant first. Return an empty array if none are clearly helpful — don't force irrelevant matches.`,
+    ].join('\n\n'),
   });
-  addUsage(totals, response.usage);
-  const text = response.content.find((b) => b.type === 'text');
-  if (!text || text.type !== 'text') {
-    return [];
-  }
-  const parsed = JSON.parse(text.text) as { relevantChatIds: number[] };
-  return parsed.relevantChatIds.slice(0, limit);
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { relevantChatIds: number[] };
+  return { ...result, data: parsed.relevantChatIds.slice(0, limit) };
 }
 
 const FILE_SUMMARY_SCHEMA = {
@@ -189,40 +172,34 @@ const FILE_SUMMARY_SCHEMA = {
 } as const;
 
 /**
- * Cheap Haiku call that turns a file's content into a short digest — stored
- * in MemoryStore (see memory.ts) and served instead of the raw file on later
- * read_file calls, as long as the file hasn't changed (see tools.ts).
+ * Cheap Haiku call (subscription-first, credits fallback) that turns a
+ * file's content into a short digest — stored in MemoryStore (see memory.ts)
+ * and served instead of the raw file on later read_file calls, as long as
+ * the file hasn't changed (see tools.ts).
  */
 export async function summarizeFile(
-  client: Anthropic,
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
   filePath: string,
-  content: string,
-  totals: UsageTotals
-): Promise<string | undefined> {
+  content: string
+): Promise<SummaryTaskResult<string> | undefined> {
   const trimmed = content.slice(0, 20_000);
   if (!trimmed.trim()) {
     return undefined;
   }
-  const response = await client.messages.create({
-    model: CLASSIFIER_MODEL,
-    max_tokens: 400,
-    output_config: { format: { type: 'json_schema', schema: FILE_SUMMARY_SCHEMA as any } },
-    messages: [
-      {
-        role: 'user',
-        content: [
-          `Summarize this file for a coding agent's lazy read cache: ${filePath}`,
-          `"""${trimmed}"""`,
-        ].join('\n\n'),
-      },
-    ],
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: FILE_SUMMARY_SCHEMA,
+    maxTokens: 400,
+    prompt: [`Summarize this file for a coding agent's lazy read cache: ${filePath}`, `"""${trimmed}"""`].join('\n\n'),
   });
-  addUsage(totals, response.usage);
-  const text = response.content.find((b) => b.type === 'text');
-  if (!text || text.type !== 'text') {
-    return undefined;
-  }
-  return (JSON.parse(text.text) as { summary: string }).summary;
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { summary: string };
+  return { ...result, data: parsed.summary };
+}
+
+function emptyUsage() {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
 
 function buildTranscript(session: Session): string {

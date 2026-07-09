@@ -1,12 +1,13 @@
 import * as path from 'path';
 import { z } from 'zod';
+import type Anthropic from '@anthropic-ai/sdk';
 import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, Options, PermissionResult, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionRequest, ToolContext } from './tools';
 import { executeTool } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
-import { supportsAdaptiveThinking } from './models';
+import { supportsAdaptiveThinking, CLASSIFIER_MODEL } from './models';
 
 /**
  * Exposes our own read_file implementation (lazy summary cache, permission
@@ -101,6 +102,17 @@ async function findClaudeExecutable(): Promise<string> {
   return found;
 }
 
+/** Force subscription auth: never let the child process see the API key. */
+function buildSubscriptionEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && k !== 'ANTHROPIC_API_KEY' && k !== 'ANTHROPIC_AUTH_TOKEN') {
+      env[k] = v;
+    }
+  }
+  return env;
+}
+
 export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<SubscriptionTurnResult> {
   let approxChars = 0;
   let lastEmit = 0;
@@ -126,14 +138,7 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
       : { behavior: 'deny', message: DENY_MESSAGE };
   };
 
-  // Force subscription auth: never let the child process see the API key.
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && k !== 'ANTHROPIC_API_KEY' && k !== 'ANTHROPIC_AUTH_TOKEN') {
-      env[k] = v;
-    }
-  }
-
+  const env = buildSubscriptionEnv();
   const claudeExecutable = await findClaudeExecutable();
 
   const options: Options = {
@@ -252,6 +257,153 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
   }
 
   return { finalText, sdkSessionId, estValueUsd, usage, isError, errorText, numTurns };
+}
+
+const UTILITY_SYSTEM_PROMPT =
+  'You are a fast, cheap utility model handling one background request for a coding agent. ' +
+  'Respond directly and concisely — no tools, no questions, no preamble.';
+
+export interface SubscriptionUtilityParams {
+  prompt: string;
+  workspaceRoot: string;
+  system?: string;
+  /** When set, the response is validated against this JSON schema and returned parsed via `structured`. */
+  schema?: Record<string, unknown>;
+}
+
+export interface SubscriptionUtilityResult {
+  text: string;
+  structured: unknown;
+  usage: SubUsage;
+  estValueUsd: number;
+  isError: boolean;
+  errorText: string | undefined;
+}
+
+/**
+ * One-shot, toolless subscription call for cheap background utility work
+ * (summarizing, classifying, compacting — see haiku.ts) — the Haiku-tier
+ * counterpart to runSubscriptionTurn's full agentic loop. Own AbortController
+ * since these aren't tied to the user's Cancel button.
+ */
+export async function runSubscriptionUtility(p: SubscriptionUtilityParams): Promise<SubscriptionUtilityResult> {
+  const env = buildSubscriptionEnv();
+  const claudeExecutable = await findClaudeExecutable();
+
+  const options: Options = {
+    cwd: p.workspaceRoot,
+    model: CLASSIFIER_MODEL,
+    pathToClaudeCodeExecutable: claudeExecutable,
+    maxTurns: 1,
+    tools: [],
+    abortController: new AbortController(),
+    env,
+    settingSources: [],
+    systemPrompt: p.system ?? UTILITY_SYSTEM_PROMPT,
+    ...(p.schema ? { outputFormat: { type: 'json_schema' as const, schema: p.schema } } : {}),
+  };
+
+  let text = '';
+  let structured: unknown;
+  let estValueUsd = 0;
+  let isError = false;
+  let errorText: string | undefined;
+  const usage: SubUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  for await (const message of query({ prompt: p.prompt, options }) as AsyncIterable<SDKMessage>) {
+    if (message.type !== 'result') {
+      continue;
+    }
+    estValueUsd = message.total_cost_usd ?? 0;
+    const u: any = (message as any).usage;
+    if (u) {
+      usage.inputTokens = u.input_tokens ?? 0;
+      usage.outputTokens = u.output_tokens ?? 0;
+      usage.cacheReadTokens = u.cache_read_input_tokens ?? 0;
+      usage.cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
+    }
+    if (message.subtype !== 'success') {
+      isError = true;
+      errorText = message.subtype;
+    } else if (message.is_error) {
+      isError = true;
+      errorText = message.result;
+    } else {
+      text = message.result ?? '';
+      structured = (message as any).structured_output;
+    }
+  }
+
+  return { text, structured, usage, estValueUsd, isError, errorText };
+}
+
+export interface HaikuTaskParams {
+  /** Undefined when there's no open workspace — the subscription attempt is skipped. */
+  workspaceRoot: string | undefined;
+  /** Undefined for subscription-only users — the credits fallback is skipped. */
+  client: Anthropic | undefined;
+  prompt: string;
+  schema?: Record<string, unknown>;
+  system?: string;
+  maxTokens: number;
+}
+
+export interface HaikuTaskResult {
+  text: string;
+  structured: unknown;
+  backend: 'subscription' | 'credits';
+  usage: SubUsage;
+  estValueUsd: number;
+}
+
+/**
+ * Runs a cheap Haiku-tier background request, preferring the user's
+ * subscription (Pro/Max plan, no API credits spent) and falling back to
+ * direct API credits only if the subscription is unavailable or fails.
+ * Throws if neither path works — callers already handle that with their own
+ * graceful degradation (empty summary, recency fallback, etc.).
+ */
+export async function runHaikuTask(p: HaikuTaskParams): Promise<HaikuTaskResult> {
+  if (p.workspaceRoot) {
+    try {
+      const r = await runSubscriptionUtility({
+        prompt: p.prompt,
+        workspaceRoot: p.workspaceRoot,
+        system: p.system,
+        schema: p.schema,
+      });
+      if (!r.isError) {
+        return { text: r.text, structured: r.structured, backend: 'subscription', usage: r.usage, estValueUsd: r.estValueUsd };
+      }
+    } catch {
+      // Subscription unavailable (no CLI, not logged in, transient error) — fall through to credits.
+    }
+  }
+
+  if (!p.client) {
+    throw new Error('Haiku task failed: subscription unavailable and no API key configured.');
+  }
+  const response = await p.client.messages.create({
+    model: CLASSIFIER_MODEL,
+    max_tokens: p.maxTokens,
+    ...(p.system ? { system: p.system } : {}),
+    ...(p.schema ? { output_config: { format: { type: 'json_schema', schema: p.schema } } } : ({} as any)),
+    messages: [{ role: 'user', content: p.prompt }],
+  });
+  const block = response.content.find((b) => b.type === 'text');
+  const text = block && block.type === 'text' ? block.text : '';
+  return {
+    text,
+    structured: p.schema && text ? JSON.parse(text) : undefined,
+    backend: 'credits',
+    usage: {
+      inputTokens: response.usage.input_tokens ?? 0,
+      outputTokens: response.usage.output_tokens ?? 0,
+      cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
+    },
+    estValueUsd: 0,
+  };
 }
 
 /**

@@ -13,7 +13,7 @@ import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
 import { MemoryStore } from './agent/memory';
-import { runSubscriptionTurn, SubscriptionTurnResult } from './agent/sdkBackend';
+import { runSubscriptionTurn, SubscriptionTurnResult, HaikuTaskResult } from './agent/sdkBackend';
 import { resetCliCache } from './agent/cliLocator';
 import {
   creditsReady,
@@ -23,7 +23,7 @@ import {
   runSetupWizard,
   subscriptionReady,
 } from './setup';
-import { UsageStore, UsageRecord } from './agent/usageStore';
+import { UsageStore, UsageRecord, UsageKind } from './agent/usageStore';
 import { UsagePanel } from './usage/panel';
 import { ChatHistoryStore } from './agent/chatHistoryStore';
 import { ProjectStore } from './agent/projectStore';
@@ -416,32 +416,21 @@ export class Controller {
 
   /**
    * Default commit message when the user didn't supply one: a cheap Haiku
-   * call summarizes the current chat session's transcript into a commit
-   * message. Falls back to a message built from staged file names if there's
-   * no client available or the summary call fails.
+   * call (subscription-first, credits fallback) summarizes the current chat
+   * session's transcript into a commit message. Falls back to a message
+   * built from staged file names if neither backend is available or the
+   * summary call fails.
    */
   private async summarizedCommitMessage(root: string): Promise<string> {
     const session = this.sessions.current;
     try {
-      const client = await this.tryGetClient();
-      if (!client || session.turns === 0) {
+      if (session.turns === 0) {
         return await this.defaultCommitMessage(root);
       }
-      const before = this.snapshotTotals(this.classifierTotals);
-      const message = await summarizeCommitMessage(client, session, this.classifierTotals);
-      const delta = this.deltaTotals(before, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'summarize',
-        sessionId: session.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
-      return message || (await this.defaultCommitMessage(root));
+      const client = await this.tryGetClient();
+      const result = await summarizeCommitMessage(client, root, session);
+      this.recordHaikuUsage('summarize', session.id, result);
+      return result.data || (await this.defaultCommitMessage(root));
     } catch (e: any) {
       this.log.appendLine(`[commit summarize error] ${e?.message ?? e}`);
       return await this.defaultCommitMessage(root);
@@ -1220,11 +1209,56 @@ export class Controller {
       taskId: String(session.id),
       taskSummary: session.taskSummary,
       readCache: session.readCache,
-      // Summarizing bills the Haiku classifier via API credits, so it's only
-      // available when an API key is configured (client is undefined for
-      // subscription-only users).
-      summarizeFile: client ? (path, content) => this.summarizeFileForMemory(client, path, content) : undefined,
+      // Tries the subscription's Haiku before falling back to credits (see
+      // summarizeFileForMemory) — available even for subscription-only users.
+      summarizeFile: (path, content) => this.summarizeFileForMemory(client, path, content),
     };
+  }
+
+  /**
+   * Adds a Haiku-tier background call's usage to the right cost bucket —
+   * subscription usage into subTotals/subValueUsd (billed to the Pro/Max
+   * plan), credits usage into classifierTotals (billed per-token) — mirroring
+   * how the main turn splits between runSubscription and the credits path.
+   */
+  private recordHaikuUsage(kind: UsageKind, sessionId: number, result: HaikuTaskResult): void {
+    if (result.backend === 'subscription') {
+      this.subTotals.inputTokens += result.usage.inputTokens;
+      this.subTotals.outputTokens += result.usage.outputTokens;
+      this.subTotals.cacheReadTokens += result.usage.cacheReadTokens;
+      this.subTotals.cacheWriteTokens += result.usage.cacheWriteTokens;
+      this.subTotals.requests += 1;
+      this.subValueUsd += result.estValueUsd;
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'subscription',
+        kind,
+        sessionId,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        costUsd: result.estValueUsd,
+      });
+    } else {
+      addUsage(this.classifierTotals, {
+        input_tokens: result.usage.inputTokens,
+        output_tokens: result.usage.outputTokens,
+        cache_read_input_tokens: result.usage.cacheReadTokens,
+        cache_creation_input_tokens: result.usage.cacheWriteTokens,
+      } as Anthropic.Usage);
+      this.recordUsage({
+        model: CLASSIFIER_MODEL,
+        backend: 'credits',
+        kind,
+        sessionId,
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        costUsd: costUsd({ ...result.usage, requests: 1 }, CLASSIFIER_MODEL),
+      });
+    }
   }
 
   /**
@@ -1232,23 +1266,14 @@ export class Controller {
    * tools.ts readFileTool / memory.ts MemoryStore.saveSummary). Never throws
    * — a missed summary just means the next read falls back to raw content.
    */
-  private async summarizeFileForMemory(client: Anthropic, filePath: string, content: string): Promise<string | undefined> {
+  private async summarizeFileForMemory(client: Anthropic | undefined, filePath: string, content: string): Promise<string | undefined> {
     try {
-      const before = this.snapshotTotals(this.classifierTotals);
-      const summary = await summarizeFile(client, filePath, content, this.classifierTotals);
-      const delta = this.deltaTotals(before, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'summarize',
-        sessionId: this.sessions.current.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
-      return summary;
+      const result = await summarizeFile(client, this.tryWorkspaceRoot(), filePath, content);
+      if (!result) {
+        return undefined;
+      }
+      this.recordHaikuUsage('summarize', this.sessions.current.id, result);
+      return result.data;
     } catch (e: any) {
       this.log.appendLine(`[file summarize error] ${e?.message ?? e}`);
       return undefined;
@@ -1302,29 +1327,14 @@ export class Controller {
     }
     try {
       const client = await this.tryGetClient();
-      if (!client) {
-        return;
-      }
-      const before = this.snapshotTotals(this.classifierTotals);
-      const { summary, highlights } = await summarizeSession(client, session, this.classifierTotals);
-      const delta = this.deltaTotals(before, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'summarize',
-        sessionId: session.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
+      const result = await summarizeSession(client, this.tryWorkspaceRoot(), session);
+      this.recordHaikuUsage('summarize', session.id, result);
       this.summaryStore.add({
         chatId: session.id,
         projectPath: this.tryWorkspaceRoot() ?? 'unknown',
         model: CLASSIFIER_MODEL,
-        summary,
-        highlights,
+        summary: result.data.summary,
+        highlights: result.data.highlights,
       });
     } catch (e: any) {
       this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
@@ -1334,8 +1344,7 @@ export class Controller {
   /**
    * Best-effort: ask Haiku which past chats in this project (if any) are
    * relevant to the upcoming task, so a new chat reuses the right memories
-   * instead of just the most recent ones. Falls back to recency without a
-   * client or on error.
+   * instead of just the most recent ones. Falls back to recency on error.
    */
   private async findRelevantPastSummaries(client: Anthropic | undefined, upcomingTask: string): Promise<SummaryRecord[]> {
     const root = this.tryWorkspaceRoot();
@@ -1347,26 +1356,11 @@ export class Controller {
     if (candidates.length === 0) {
       return [];
     }
-    if (!client) {
-      return candidates.slice(0, 5);
-    }
     try {
-      const before = this.snapshotTotals(this.classifierTotals);
-      const ids = await findRelevantChats(client, this.classifierTotals, upcomingTask, candidates);
-      const delta = this.deltaTotals(before, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'recall',
-        sessionId: this.sessions.current.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
+      const result = await findRelevantChats(client, root, upcomingTask, candidates);
+      this.recordHaikuUsage('recall', this.sessions.current.id, result);
       const byId = new Map(candidates.map((c) => [c.chatId, c]));
-      return ids.map((id) => byId.get(id)).filter((s): s is SummaryRecord => !!s);
+      return result.data.map((id) => byId.get(id)).filter((s): s is SummaryRecord => !!s);
     } catch (e: any) {
       this.log.appendLine(`[recall error] ${e?.message ?? e}`);
       return candidates.slice(0, 5);
@@ -1398,26 +1392,9 @@ export class Controller {
     }
     try {
       const before = session.lastInputTokens;
-      const beforeTotals = this.snapshotTotals(this.classifierTotals);
-      const { summary, usage } = await compactTranscript(
-        client,
-        CLASSIFIER_MODEL,
-        session.messages,
-        this.compactionMaxTokens()
-      );
-      addUsage(this.classifierTotals, usage);
-      const delta = this.deltaTotals(beforeTotals, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'compact',
-        sessionId: session.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
+      const result = await compactTranscript(client, this.tryWorkspaceRoot(), session.messages, this.compactionMaxTokens());
+      this.recordHaikuUsage('compact', session.id, result);
+      const summary = result.summary;
       if (!summary) {
         return;
       }

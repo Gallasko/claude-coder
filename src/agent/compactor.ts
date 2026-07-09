@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { runHaikuTask, HaikuTaskResult } from './sdkBackend';
 
 const COMPACT_SYSTEM =
   'Summarize this coding-agent transcript into a compact brief for continuing the same task. Include: the ' +
@@ -9,33 +10,30 @@ const COMPACT_SYSTEM =
 /** Characters of transcript fed to the summarizer, kept low to keep this call itself cheap. */
 const MAX_TRANSCRIPT_CHARS = 40_000;
 
-export interface CompactResult {
-  summary: string;
-  usage: Anthropic.Usage;
-}
+export type CompactResult = HaikuTaskResult & { summary: string };
 
 /**
- * Local, cheap (Haiku) stand-in for server-side compaction: collapse a
- * growing transcript into one dense summary instead of paying full price to
- * resend it every turn. Never mutates the session itself — the caller
- * (controller.ts `compactIfNeeded`) decides whether/how to replace the
- * transcript with the summary.
+ * Local, cheap (Haiku, subscription-first with credits fallback) stand-in
+ * for server-side compaction: collapse a growing transcript into one dense
+ * summary instead of paying full price to resend it every turn. Never
+ * mutates the session itself — the caller (controller.ts `compactIfNeeded`)
+ * decides whether/how to replace the transcript with the summary.
  */
 export async function compactTranscript(
-  client: Anthropic,
-  model: string,
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
   messages: Anthropic.MessageParam[],
   maxTokens: number
 ): Promise<CompactResult> {
   const transcript = flatten(messages).slice(-MAX_TRANSCRIPT_CHARS);
-  const response = await client.messages.create({
-    model,
-    max_tokens: maxTokens,
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    maxTokens,
     system: COMPACT_SYSTEM,
-    messages: [{ role: 'user', content: `Transcript so far:\n"""${transcript}"""` }],
+    prompt: `Transcript so far:\n"""${transcript}"""`,
   });
-  const block = response.content.find((b) => b.type === 'text');
-  return { summary: block && block.type === 'text' ? block.text.trim() : '', usage: response.usage };
+  return { ...result, summary: result.text.trim() };
 }
 
 function flatten(messages: Anthropic.MessageParam[]): string {
