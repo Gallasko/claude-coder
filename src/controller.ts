@@ -909,6 +909,12 @@ export class Controller {
     );
   }
 
+  /** Opens a drafted plan in a full editor tab (markdown) so it's easier to read than the chat sidebar. */
+  async openPlanInEditor(plan: string): Promise<void> {
+    const doc = await vscode.workspace.openTextDocument({ content: plan, language: 'markdown' });
+    await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+  }
+
   /** Manual, freeform memory note for the current project (see MemoryStore.addNote). */
   async addMemoryNote(text: string): Promise<void> {
     const memory = await this.ensureMemory();

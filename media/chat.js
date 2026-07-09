@@ -323,6 +323,16 @@
           detail.className = 'perm-detail';
           detail.textContent = msg.detail;
           card.appendChild(detail);
+
+          if (isPlan) {
+            const openBtn = document.createElement('button');
+            openBtn.className = 'perm-open-editor';
+            openBtn.textContent = 'Open in editor';
+            openBtn.addEventListener('click', () => {
+              vscode.postMessage({ type: 'openPlan', text: msg.detail });
+            });
+            card.appendChild(openBtn);
+          }
         }
 
         const buttons = document.createElement('div');

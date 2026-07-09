@@ -50,6 +50,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'runSetup':
           await this.controller.runSetup();
           break;
+        case 'openPlan':
+          await this.controller.openPlanInEditor(String(msg.text ?? ''));
+          break;
       }
     });
 
