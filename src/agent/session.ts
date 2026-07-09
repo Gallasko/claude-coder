@@ -1,7 +1,11 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { UsageTotals, emptyTotals, costUsd } from './models';
 
-let nextId = 1;
+// Seeded from wall time so ids stay unique across extension-host restarts —
+// ChatHistoryStore/SummaryStore persist records keyed by this id, and a
+// restart-reset counter would collide with old rows and silently merge
+// new chats into them instead of creating new entries.
+let nextId = Date.now();
 
 /**
  * One session = one task = one conversation transcript on one model.

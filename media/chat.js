@@ -16,6 +16,8 @@
 
   /** The assistant bubble currently being streamed into, if any. */
   let streamEl = null;
+  /** Raw markdown accumulated for the bubble currently streaming. */
+  let streamRaw = '';
   /** The ephemeral "working…" indicator shown while a turn runs. */
   let workingEl = null;
   /** The collapsible "thinking" block for the current turn, if any. */
@@ -103,6 +105,7 @@
     { name: 'usage', desc: 'Show usage history & billing tracker' },
     { name: 'history', desc: 'Show all chats & sessions' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
+    { name: 'commit', desc: 'Commit current changes (/commit <message>)' },
     { name: 'help', desc: 'List available commands' },
   ];
 
@@ -160,7 +163,7 @@
     runSlashCommand(cmd.name);
   }
 
-  function runSlashCommand(name) {
+  function runSlashCommand(name, arg) {
     inputEl.value = '';
     switch (name) {
       case 'setup':
@@ -184,6 +187,9 @@
         break;
       case 'reset-permissions':
         vscode.postMessage({ type: 'resetPermissions' });
+        break;
+      case 'commit':
+        vscode.postMessage({ type: 'commit', text: arg || '' });
         break;
       case 'help':
         addMsg('notice', 'Available commands:\n' + SLASH_COMMANDS.map((c) => '/' + c.name + ' — ' + c.desc).join('\n'));
@@ -216,12 +222,12 @@
     if (!text) {
       return;
     }
-    const cmdMatch = /^\/([\w-]+)$/.exec(text);
+    const cmdMatch = /^\/([\w-]+)(?:\s+([\s\S]*))?$/.exec(text);
     if (cmdMatch) {
       const known = SLASH_COMMANDS.find((c) => c.name === cmdMatch[1].toLowerCase());
       if (known) {
         closeCommandMenu();
-        runSlashCommand(known.name);
+        runSlashCommand(known.name, cmdMatch[2]);
         return;
       }
     }
@@ -281,8 +287,10 @@
       case 'delta':
         if (!streamEl) {
           streamEl = addMsg('assistant', '');
+          streamRaw = '';
         }
-        streamEl.textContent += msg.text;
+        streamRaw += msg.text;
+        streamEl.innerHTML = renderMarkdown(streamRaw);
         if (workingEl) {
           messagesEl.appendChild(workingEl); // stay below the streaming text
         }

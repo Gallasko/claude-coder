@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import Anthropic from '@anthropic-ai/sdk';
 import { Session, SessionManager } from './agent/session';
 import { runTurn } from './agent/loop';
@@ -42,6 +44,8 @@ import {
 export interface UiSink {
   post(message: Record<string, unknown>): void;
 }
+
+const execFileAsync = promisify(execFile);
 
 type PermissionChoice = 'yes' | 'always' | 'no';
 
@@ -335,6 +339,49 @@ export class Controller {
   async resetPermissions(): Promise<void> {
     this.sessions.current.alwaysAllowed.clear();
     vscode.window.showInformationMessage('Claude Coder: "always allow" permissions cleared for the current chat.');
+  }
+
+  async commitChanges(message: string): Promise<void> {
+    const root = this.tryWorkspaceRoot();
+    if (!root) {
+      this.post({ type: 'notice', text: 'Open a folder first — Claude Coder needs a workspace.' });
+      return;
+    }
+    try {
+      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root });
+    } catch {
+      this.post({ type: 'notice', text: 'Not a git repository.' });
+      return;
+    }
+
+    const { stdout: status } = await execFileAsync('git', ['status', '--porcelain'], { cwd: root });
+    if (!status.trim()) {
+      this.post({ type: 'notice', text: 'Nothing to commit — working tree is clean.' });
+      return;
+    }
+
+    await execFileAsync('git', ['add', '-A'], { cwd: root });
+    const commitMessage = message.trim() || (await this.defaultCommitMessage(root));
+
+    try {
+      await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
+      this.post({ type: 'notice', text: `Committed: ${commitMessage}` });
+    } catch (e) {
+      this.post({ type: 'notice', text: `Commit failed: ${describeError(e)}` });
+    }
+  }
+
+  /** Falls back to a message built from staged file names when the user didn't give one. */
+  private async defaultCommitMessage(root: string): Promise<string> {
+    const { stdout } = await execFileAsync('git', ['diff', '--cached', '--name-only'], { cwd: root });
+    const files = stdout.trim().split('\n').filter(Boolean);
+    if (files.length === 0) {
+      return 'Update files';
+    }
+    if (files.length <= 3) {
+      return `Update ${files.join(', ')}`;
+    }
+    return `Update ${files.slice(0, 3).join(', ')} and ${files.length - 3} more`;
   }
 
   // ---------- main entry: user sent a prompt ----------

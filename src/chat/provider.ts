@@ -50,6 +50,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'runSetup':
           await this.controller.runSetup();
           break;
+        case 'commit':
+          await this.controller.commitChanges(String(msg.text ?? ''));
+          break;
         case 'openPlan':
           await this.controller.openPlanInEditor(String(msg.text ?? ''));
           break;
@@ -65,6 +68,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private html(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.js'));
+    const markdownUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.css'));
     const nonce = Math.random().toString(36).slice(2);
     return `<!DOCTYPE html>
@@ -95,6 +99,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="btn-send">Send</button>
     </div>
   </div>
+  <script nonce="${nonce}" src="${markdownUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
