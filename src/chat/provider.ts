@@ -53,9 +53,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'commit':
           await this.controller.commitChanges(String(msg.text ?? ''));
           break;
-        case 'openPlan':
-          await this.controller.openPlanInEditor(String(msg.text ?? ''));
-          break;
       }
     });
 

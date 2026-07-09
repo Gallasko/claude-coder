@@ -242,18 +242,6 @@ body {
   word-break: normal;
 }
 
-.perm-open-editor {
-  background: transparent;
-  color: var(--vscode-textLink-foreground);
-  padding: 0 4px;
-  font-size: 0.85em;
-  margin-top: 2px;
-}
-
-.perm-open-editor:hover {
-  background: var(--vscode-list-hoverBackground);
-}
-
 .msg.setup {
   border: 1px solid var(--vscode-focusBorder);
   border-radius: 6px;

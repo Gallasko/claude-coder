@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Anthropic from '@anthropic-ai/sdk';
@@ -325,10 +327,12 @@ export class Controller {
     const choicePromise = new Promise<PermissionChoice>((resolve) => {
       this.permissionResolvers.set(id, resolve);
     });
+    const planFile = await this.openPlanInEditor(plan);
     this.post({ type: 'permission', id, kind: 'plan', title: 'Plan ready — proceed with implementation?', detail: plan });
     const choice = await choicePromise;
     this.permissionResolvers.delete(id);
     this.post({ type: 'permissionResolved', id, choice });
+    await this.closePlanFile(planFile, /* keep */ choice !== 'no');
     return choice !== 'no';
   }
 
@@ -956,10 +960,39 @@ export class Controller {
     );
   }
 
-  /** Opens a drafted plan in a full editor tab (markdown) so it's easier to read than the chat sidebar. */
-  async openPlanInEditor(plan: string): Promise<void> {
-    const doc = await vscode.workspace.openTextDocument({ content: plan, language: 'markdown' });
+  /**
+   * Opens a drafted plan in a full editor tab (markdown) so it's easier to read than the chat sidebar.
+   * Writes the plan to a temp file first and opens *that* (instead of an untitled buffer) so the
+   * document is never dirty — closing the tab never prompts the user to save.
+   */
+  private async openPlanInEditor(plan: string): Promise<{ uri: vscode.Uri; fsPath: string }> {
+    const fsPath = path.join(os.tmpdir(), `claude-coder-plan-${Date.now()}-${this.permissionId}.md`);
+    await fs.writeFile(fsPath, plan, 'utf8');
+    const uri = vscode.Uri.file(fsPath);
+    const doc = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+    return { uri, fsPath };
+  }
+
+  /** Closes the plan's editor tab and either archives the temp file into history (approved) or deletes it (rejected). */
+  private async closePlanFile(planFile: { uri: vscode.Uri; fsPath: string }, keep: boolean): Promise<void> {
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input instanceof vscode.TabInputText && tab.input.uri.toString() === planFile.uri.toString()) {
+          await vscode.window.tabGroups.close(tab);
+        }
+      }
+    }
+    try {
+      if (keep) {
+        const historyDir = path.join(this.context.globalStorageUri.fsPath, 'plans');
+        await fs.mkdir(historyDir, { recursive: true });
+        const dest = path.join(historyDir, path.basename(planFile.fsPath));
+        await fs.copyFile(planFile.fsPath, dest);
+      }
+    } finally {
+      await fs.unlink(planFile.fsPath).catch(() => undefined);
+    }
   }
 
   /** Manual, freeform memory note for the current project (see MemoryStore.addNote). */
