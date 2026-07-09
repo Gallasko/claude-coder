@@ -303,31 +303,74 @@ export class Controller {
       if (session.backend === 'subscription') {
         try {
           const result = await this.runSubscription(session, content, minimize);
-          this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
-          this.postSessionInfo();
-          if (result.isError) {
+          if (result.isError && isUsageLimitOrModelError(result.errorText)) {
+            // Subscription usage limit hit or the model isn't available on
+            // this plan — fall back to API credits for this turn automatically,
+            // no user confirmation needed.
+            this.log.appendLine(`[sub usage-limit/model fallback] ${result.errorText}`);
             this.post({
               type: 'notice',
-              text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
+              text: `Subscription limit reached (${result.errorText ?? 'unknown'}) — using API credits for this turn.`,
             });
-            void this.offerEscalation(
-              `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
-            );
+            session.backend = 'credits';
+          } else {
+            this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
+            this.postSessionInfo();
+            if (result.isError) {
+              this.post({
+                type: 'notice',
+                text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
+              });
+              void this.offerEscalation(
+                `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
+              );
+            }
+            return;
           }
-          return;
         } catch (e: any) {
           if (e?.message === 'cancelled' || e?.name === 'AbortError' || this.abort?.signal.aborted) {
             throw e;
           }
-          // Typical cause: no Claude Code login for the subscription. Fall
-          // back to credits for this task instead of failing the prompt.
+          // Could be a real setup problem (CLI missing/not logged in) or just
+          // a transient connection hiccup. Ask before spending credits instead
+          // of silently switching billing.
           this.log.appendLine(`[sub error] ${e?.stack ?? e}`);
-          this.post({
-            type: 'notice',
-            text:
-              'Subscription backend unavailable — falling back to API credits for this task. ' +
-              'To use your Pro/Max plan, install Claude Code and log in (`claude` → /login), then start a new task.',
+          const reason = e?.message ?? String(e);
+          const retry = await this.requestPermission({
+            kind: 'command',
+            key: `sub-unavailable:${++this.permissionId}`,
+            title: 'Claude subscription unavailable',
+            detail:
+              `${reason}\n\nThis may just be a connection hiccup with Claude Code, or it may need attention ` +
+              '(install/login). Choose "Yes" to retry the subscription now, or "No" to fall back to API credits for this task.',
           });
+          if (retry) {
+            try {
+              const result = await this.runSubscription(session, content, minimize);
+              this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
+              this.postSessionInfo();
+              if (result.isError) {
+                this.post({
+                  type: 'notice',
+                  text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
+                });
+              }
+              return;
+            } catch (e2: any) {
+              this.log.appendLine(`[sub retry error] ${e2?.stack ?? e2}`);
+              this.post({
+                type: 'notice',
+                text: `Subscription still unavailable (${e2?.message ?? e2}) — falling back to API credits for this task.`,
+              });
+            }
+          } else {
+            this.post({
+              type: 'notice',
+              text:
+                'Falling back to API credits for this task. ' +
+                'To use your Pro/Max plan, install Claude Code and log in (`claude` → /login), then start a new task.',
+            });
+          }
           session.backend = 'credits';
         }
       }
@@ -825,6 +868,24 @@ export class Controller {
 }
 
 /** Terse preview of a drafted plan: first couple of bullets, capped in length. */
+/**
+ * Detects subscription-side failures that should trigger an automatic,
+ * silent fallback to API credits: usage/rate limits and models the current
+ * plan can't access. Any other error (auth, bad request, etc.) surfaces
+ * normally instead of silently spending credits.
+ */
+function isUsageLimitOrModelError(errorText: string | undefined): boolean {
+  if (!errorText) {
+    return false;
+  }
+  const t = errorText.toLowerCase();
+  return (
+    /usage limit|rate limit|rate_limit|429|quota|too many requests/.test(t) ||
+    /model.{0,20}(not found|not available|not allowed|unsupported|unavailable)/.test(t) ||
+    /not_found_error|permission_error|model_not_found/.test(t)
+  );
+}
+
 function summarizePlan(plan: string, maxLines = 3, maxChars = 220): string {
   const lines = plan
     .split('\n')
