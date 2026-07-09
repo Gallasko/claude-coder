@@ -41,6 +41,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'showUsageHistory':
           await this.controller.showUsageHistory();
           break;
+        case 'showChatHistory':
+          await this.controller.showChatHistory();
+          break;
         case 'resetPermissions':
           await this.controller.resetPermissions();
           break;
@@ -77,6 +80,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <span class="spacer"></span>
     <button id="btn-escalate" title="Restart this task on the next bigger model">Escalate</button>
     <button id="btn-new" title="Archive this session and start fresh">New task</button>
+    <button id="btn-history" title="Show all chats & sessions">History</button>
   </div>
   <div id="task-line"></div>
   <div id="messages"></div>

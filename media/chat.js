@@ -8,6 +8,7 @@
   const cancelBtn = document.getElementById('btn-cancel');
   const newBtn = document.getElementById('btn-new');
   const escalateBtn = document.getElementById('btn-escalate');
+  const historyBtn = document.getElementById('btn-history');
   const modelEl = document.getElementById('session-model');
   const costEl = document.getElementById('session-cost');
   const taskEl = document.getElementById('task-line');
@@ -100,6 +101,7 @@
     { name: 'escalate', desc: 'Restart task on the next bigger model' },
     { name: 'costs', desc: 'Show session cost breakdown' },
     { name: 'usage', desc: 'Show usage history & billing tracker' },
+    { name: 'history', desc: 'Show all chats & sessions' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
     { name: 'help', desc: 'List available commands' },
   ];
@@ -176,6 +178,9 @@
         break;
       case 'usage':
         vscode.postMessage({ type: 'showUsageHistory' });
+        break;
+      case 'history':
+        vscode.postMessage({ type: 'showChatHistory' });
         break;
       case 'reset-permissions':
         vscode.postMessage({ type: 'resetPermissions' });
@@ -264,6 +269,7 @@
   });
   cancelBtn.addEventListener('click', () => vscode.postMessage({ type: 'cancel' }));
   newBtn.addEventListener('click', () => vscode.postMessage({ type: 'newTask' }));
+  historyBtn.addEventListener('click', () => vscode.postMessage({ type: 'showChatHistory' }));
   escalateBtn.addEventListener('click', () => {
     setBusy(true);
     vscode.postMessage({ type: 'escalate' });
