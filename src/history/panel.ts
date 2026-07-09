@@ -50,6 +50,8 @@ export class ChatHistoryPanel {
     const nonce = Math.random().toString(36).slice(2);
 
     const totalCost = chats.reduce((sum, c) => sum + c.costUsd, 0);
+    const subscriptionCost = chats.reduce((sum, c) => sum + (c.backend === 'subscription' ? c.costUsd : 0), 0);
+    const apiCost = chats.reduce((sum, c) => sum + (c.backend === 'credits' ? c.costUsd : 0), 0);
     const totalMessages = chats.reduce((sum, c) => sum + c.promptCount, 0);
     const totalChars = chats.reduce((sum, c) => sum + c.userChars + c.assistantChars, 0);
 
@@ -102,6 +104,8 @@ export class ChatHistoryPanel {
     <div class="stat"><div class="label">Messages</div><div class="value">${totalMessages}</div></div>
     <div class="stat"><div class="label">Total length</div><div class="value">${tok(totalChars)} chars</div></div>
     <div class="stat"><div class="label">Total cost</div><div class="value">${formatUsd(totalCost)}</div></div>
+    <div class="stat"><div class="label">Subscription</div><div class="value">${formatUsd(subscriptionCost)}</div></div>
+    <div class="stat"><div class="label">API</div><div class="value">${formatUsd(apiCost)}</div></div>
   </div>
 
   ${
