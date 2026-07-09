@@ -403,6 +403,7 @@ export class Controller {
     }
 
     await execFileAsync('git', ['add', '-A'], { cwd: root });
+    this.post({ type: 'notice', text: 'Committing changes…' });
     const commitMessage = message.trim() || (await this.summarizedCommitMessage(root));
 
     try {
