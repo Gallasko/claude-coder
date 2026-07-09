@@ -555,7 +555,7 @@ export class Controller {
       // ---- subscription backend (Agent SDK, billed to the user's plan) ----
       if (session.backend === 'subscription') {
         try {
-          const result = await this.runSubscription(session, content, minimize);
+          const result = await this.runSubscription(session, content, minimize, memory, client);
           if (result.isError && isUsageLimitOrModelError(result.errorText)) {
             // Subscription usage limit hit or the model isn't available on
             // this plan — fall back to API credits for this turn automatically,
@@ -619,7 +619,7 @@ export class Controller {
           });
           if (retry) {
             try {
-              const result = await this.runSubscription(session, content, minimize);
+              const result = await this.runSubscription(session, content, minimize, memory, client);
               this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
               this.postSessionInfo();
               if (result.isError) {
@@ -752,15 +752,18 @@ export class Controller {
   private async runSubscription(
     session: Session,
     prompt: string,
-    minimize: boolean
+    minimize: boolean,
+    memory: MemoryStore,
+    client: Anthropic | undefined
   ): Promise<SubscriptionTurnResult> {
     const result = await runSubscriptionTurn({
       prompt,
       workspaceRoot: this.workspaceRoot(),
+      toolCtx: this.buildToolContext(session, memory, client),
       model: this.subscriptionModel(),
       resumeSessionId: session.sdkSessionId,
       minimizeOutput: minimize,
-      maxTurns: 50,
+      maxTurns: 100,
       abort: this.abort!,
       requestPermission: (req) => this.requestPermission(req),
       onText: (delta) => this.post({ type: 'delta', text: delta }),
@@ -1207,7 +1210,7 @@ export class Controller {
     return this.memory;
   }
 
-  private buildToolContext(session: Session, memory: MemoryStore, client: Anthropic): ToolContext {
+  private buildToolContext(session: Session, memory: MemoryStore, client: Anthropic | undefined): ToolContext {
     return {
       workspaceRoot: this.workspaceRoot(),
       requestPermission: (req) => this.requestPermission(req),
@@ -1217,7 +1220,10 @@ export class Controller {
       taskId: String(session.id),
       taskSummary: session.taskSummary,
       readCache: session.readCache,
-      summarizeFile: (path, content) => this.summarizeFileForMemory(client, path, content),
+      // Summarizing bills the Haiku classifier via API credits, so it's only
+      // available when an API key is configured (client is undefined for
+      // subscription-only users).
+      summarizeFile: client ? (path, content) => this.summarizeFileForMemory(client, path, content) : undefined,
     };
   }
 

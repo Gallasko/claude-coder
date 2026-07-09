@@ -1,10 +1,40 @@
 import * as path from 'path';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, Options, PermissionResult, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { PermissionRequest } from './tools';
+import type { PermissionRequest, ToolContext } from './tools';
+import { executeTool } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
 import { supportsAdaptiveThinking } from './models';
+
+/**
+ * Exposes our own read_file implementation (lazy summary cache, permission
+ * checks, memory tracking — see tools.ts) as an in-process MCP server, so the
+ * Agent SDK's subprocess reads files through it instead of its built-in Read
+ * tool. `disallowedTools: ['Read']` below forces that route.
+ */
+function buildWorkspaceFsServer(toolCtx: ToolContext) {
+  return createSdkMcpServer({
+    name: 'workspace-fs',
+    tools: [
+      tool(
+        'read_file',
+        'Read a file. Returns numbered lines. Use offset/limit for large files. Paths outside the workspace require user permission.',
+        {
+          path: z.string().describe('Workspace-relative or absolute file path'),
+          offset: z.number().optional().describe('1-based line to start from'),
+          limit: z.number().optional().describe('Max lines to return'),
+          full: z.boolean().optional().describe('Force the exact raw content even if a cached summary is available'),
+        },
+        async (args) => {
+          const outcome = await executeTool(toolCtx, 'read_file', args);
+          return { content: [{ type: 'text', text: outcome.content }], isError: outcome.isError };
+        }
+      ),
+    ],
+  });
+}
 
 /**
  * Subscription backend: runs the task through the Claude Agent SDK, which
@@ -34,6 +64,8 @@ export interface SubscriptionTurnResult {
 export interface SubscriptionTurnParams {
   prompt: string;
   workspaceRoot: string;
+  /** Backs the workspace-fs MCP server (see buildWorkspaceFsServer) so file reads go through our custom read_file, not the SDK's built-in Read tool. */
+  toolCtx: ToolContext;
   /** 'sonnet' | 'opus' | 'haiku' or a full model id. */
   model: string;
   resumeSessionId: string | undefined;
@@ -114,6 +146,14 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
     canUseTool,
     env,
     settingSources: [],
+    // Route file reads through our own read_file (lazy summary cache,
+    // permission checks, memory tracking) instead of the SDK's built-in Read.
+    // disallowedTools removes Read's own schema/definition from the model's
+    // context entirely, so it can only see and call our MCP tool below —
+    // toolAliases would keep Read's `file_path`-shaped schema visible and
+    // redirect by name only, risking an input-shape mismatch with our tool.
+    mcpServers: { 'workspace-fs': buildWorkspaceFsServer(p.toolCtx) },
+    disallowedTools: ['Read'],
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
