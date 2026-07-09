@@ -19,7 +19,7 @@ export interface ChangeRecord {
   taskId: string;
   taskSummary: string;
   path: string;
-  tool: 'write_file' | 'edit_file';
+  tool: 'write_file' | 'edit_file' | 'multi_edit_file';
   before: string;
   after: string;
   timestamp: number;

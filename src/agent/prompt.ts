@@ -34,6 +34,9 @@ export const SYSTEM_PROMPT = `You are Claude Coder, a coding agent running insid
  * our strict communication rules. FROZEN, like everything cache-relevant.
  */
 export const SUBSCRIPTION_SYSTEM_APPEND = `
+# Tool usage — this environment
+The built-in Read/Write/Edit/MultiEdit/Grep/Glob tools are disabled here. Use these instead, offered as MCP tools under the workspace-fs server: read_file, write_file, edit_file, multi_edit_file, glob, grep, get_diagnostics. They take the same kind of arguments (path, old_string/new_string, pattern, etc.) and behave the same way. Do not use Bash with cat/awk/sed/grep to read, search or edit files — always prefer read_file/grep/edit_file, including from any sub-agent you launch.
+
 # Communication — strict
 - No preamble, no pleasantries, no praise, no emoji, no restating the request.
 - Between tool calls, stay silent unless a finding changes the plan — then one short sentence.

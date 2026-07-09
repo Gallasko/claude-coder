@@ -10,12 +10,24 @@ import { findClaudeCli, SetupNeededError } from './cliLocator';
 import { supportsAdaptiveThinking, CLASSIFIER_MODEL } from './models';
 
 /**
- * Exposes our own read_file implementation (lazy summary cache, permission
- * checks, memory tracking — see tools.ts) as an in-process MCP server, so the
- * Agent SDK's subprocess reads files through it instead of its built-in Read
- * tool. `disallowedTools: ['Read']` below forces that route.
+ * Exposes the same tool set the credits backend uses (see tools.ts:
+ * read_file, write_file, edit_file, multi_edit_file, glob, grep,
+ * get_diagnostics) as an in-process MCP server, so the Agent SDK's
+ * subprocess routes file access through our lazy summary cache, permission
+ * checks, memory tracking, and diff-based edit approval instead of its
+ * built-in Read/Write/Edit/MultiEdit/Grep/Glob tools. `disallowedTools`
+ * below forces that route; Bash, NotebookEdit and other SDK-native tools
+ * have no canonical equivalent here and stay on the plain
+ * requestPermission path (see mapToolToPermission).
  */
 function buildWorkspaceFsServer(toolCtx: ToolContext) {
+  const passthrough =
+    (name: string) =>
+    async (args: unknown) => {
+      const outcome = await executeTool(toolCtx, name, args);
+      return { content: [{ type: 'text' as const, text: outcome.content }], isError: outcome.isError };
+    };
+
   return createSdkMcpServer({
     name: 'workspace-fs',
     tools: [
@@ -28,10 +40,69 @@ function buildWorkspaceFsServer(toolCtx: ToolContext) {
           limit: z.number().optional().describe('Max lines to return'),
           full: z.boolean().optional().describe('Force the exact raw content even if a cached summary is available'),
         },
-        async (args) => {
-          const outcome = await executeTool(toolCtx, 'read_file', args);
-          return { content: [{ type: 'text', text: outcome.content }], isError: outcome.isError };
-        }
+        passthrough('read_file')
+      ),
+      tool(
+        'write_file',
+        'Create or overwrite a file with the given content. Parent directories are created.',
+        {
+          path: z.string().describe('Workspace-relative or absolute file path'),
+          content: z.string().describe('Full file content'),
+        },
+        passthrough('write_file')
+      ),
+      tool(
+        'edit_file',
+        'Replace an exact string in a file. old_string must appear exactly once unless replace_all is true. Include enough surrounding context to make it unique.',
+        {
+          path: z.string().describe('Workspace-relative or absolute file path'),
+          old_string: z.string().describe('Exact text to replace (no line-number prefixes)'),
+          new_string: z.string().describe('Replacement text'),
+          replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
+        },
+        passthrough('edit_file')
+      ),
+      tool(
+        'multi_edit_file',
+        'Apply several edit_file-style replacements to one file atomically (one diff, one approval). Edits are applied in order; each old_string must match the content as it stands after the previous edits.',
+        {
+          path: z.string().describe('Workspace-relative or absolute file path'),
+          edits: z
+            .array(
+              z.object({
+                old_string: z.string().describe('Exact text to replace (no line-number prefixes)'),
+                new_string: z.string().describe('Replacement text'),
+                replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
+              })
+            )
+            .describe('Ordered list of edits to apply'),
+        },
+        passthrough('multi_edit_file')
+      ),
+      tool(
+        'glob',
+        'Find files matching a glob pattern, e.g. "src/**/*.ts". Returns up to 200 paths.',
+        {
+          pattern: z.string().describe('Glob pattern relative to workspace root'),
+        },
+        passthrough('glob')
+      ),
+      tool(
+        'grep',
+        'Search file contents with a regular expression. Returns matching lines as path:line:text. Call this to locate code before reading files.',
+        {
+          pattern: z.string().describe('JavaScript regular expression'),
+          include: z.string().optional().describe('Optional glob to restrict files, e.g. "**/*.ts"'),
+        },
+        passthrough('grep')
+      ),
+      tool(
+        'get_diagnostics',
+        "Get VS Code language-server diagnostics (errors/warnings). Use after editing to verify you didn't break anything. Omit path to get all workspace diagnostics.",
+        {
+          path: z.string().optional().describe('Optional workspace-relative file path to filter on'),
+        },
+        passthrough('get_diagnostics')
       ),
     ],
   });
@@ -151,14 +222,14 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
     canUseTool,
     env,
     settingSources: [],
-    // Route file reads through our own read_file (lazy summary cache,
-    // permission checks, memory tracking) instead of the SDK's built-in Read.
-    // disallowedTools removes Read's own schema/definition from the model's
-    // context entirely, so it can only see and call our MCP tool below —
-    // toolAliases would keep Read's `file_path`-shaped schema visible and
-    // redirect by name only, risking an input-shape mismatch with our tool.
+    // Route file access through our own tools (lazy summary cache,
+    // permission checks, memory tracking, diff-based edit approval) instead
+    // of the SDK's built-ins. disallowedTools removes their schemas from the
+    // model's context entirely, so it can only see and call the MCP tools
+    // below — toolAliases would keep the built-ins' schemas visible and
+    // redirect by name only, risking an input-shape mismatch with ours.
     mcpServers: { 'workspace-fs': buildWorkspaceFsServer(p.toolCtx) },
-    disallowedTools: ['Read'],
+    disallowedTools: ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob'],
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
@@ -430,10 +501,10 @@ function mapToolToPermission(
       const firstWord = command.trim().split(/\s+/)[0] ?? command;
       return { kind: 'command', key: `command:${firstWord}`, title: 'Run command', detail: command };
     }
-    case 'Write':
-    case 'Edit':
-    case 'MultiEdit':
     case 'NotebookEdit': {
+      // The only SDK-native edit tool left after disallowedTools — Write/Edit/
+      // MultiEdit route through workspace-fs (see buildWorkspaceFsServer),
+      // which handles its own diff-based approval via requestEditApproval.
       if (!filePath) {
         return { kind: 'edit', key: 'workspace-edits', title: `${toolName} (unknown path)`, detail: JSON.stringify(input).slice(0, 200) };
       }
@@ -442,49 +513,28 @@ function mapToolToPermission(
         return {
           kind: 'outside-write',
           key: `write:${path.dirname(abs)}`,
-          title: `${toolName === 'Write' ? 'Write' : 'Edit'} a file outside the workspace`,
+          title: 'Edit a file outside the workspace',
           detail: abs,
         };
       }
       return {
         kind: 'edit',
         key: 'workspace-edits',
-        title: `${toolName === 'Write' ? 'Write' : 'Edit'} ${path.relative(workspaceRoot, abs)}`,
-        detail: summarizeEdit(toolName, input),
+        title: `Edit ${path.relative(workspaceRoot, abs)}`,
+        detail: summarizeEdit(input),
       };
     }
-    case 'Read':
-    case 'Glob':
-    case 'Grep': {
-      const target = filePath ?? (typeof input.path === 'string' ? input.path : undefined);
-      if (target) {
-        const { abs, isOutside } = outside(target);
-        if (isOutside) {
-          return {
-            kind: 'outside-read',
-            key: `read:${path.dirname(abs)}`,
-            title: 'Read outside the workspace',
-            detail: abs,
-          };
-        }
-      }
-      return undefined;
-    }
     default:
-      // WebSearch/WebFetch/TodoWrite/Task and other internal tools: read-only
-      // or harmless — allow without interrupting the user.
+      // Read/Write/Edit/MultiEdit/Grep/Glob are disallowed (see options
+      // above) and never reach here. WebSearch/WebFetch/TodoWrite/Task and
+      // other internal tools: read-only or harmless — allow without
+      // interrupting the user.
       return undefined;
   }
 }
 
-function summarizeEdit(toolName: string, input: Record<string, unknown>): string {
+function summarizeEdit(input: Record<string, unknown>): string {
   const one = (s: unknown, max = 140) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
-  if (toolName === 'Write') {
-    return `(${String(input.content ?? '').length} chars)\n${one(input.content, 250)}`;
-  }
-  if (toolName === 'Edit') {
-    return `- ${one(input.old_string)}\n+ ${one(input.new_string)}`;
-  }
   return one(JSON.stringify(input), 250);
 }
 
@@ -495,6 +545,9 @@ function previewToolInput(input: unknown): string {
   }
   if (typeof i?.file_path === 'string') {
     return i.file_path;
+  }
+  if (typeof i?.path === 'string') {
+    return i.path;
   }
   if (typeof i?.pattern === 'string') {
     return i.pattern;

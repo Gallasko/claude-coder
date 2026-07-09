@@ -64,6 +64,31 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'multi_edit_file',
+    description:
+      'Apply several edit_file-style replacements to one file atomically (one diff, one approval). Edits are applied in order; each old_string must match the content as it stands after the previous edits.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative or absolute file path' },
+        edits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'Exact text to replace (no line-number prefixes)' },
+              new_string: { type: 'string', description: 'Replacement text' },
+              replace_all: { type: 'boolean', description: 'Replace every occurrence (default false)' },
+            },
+            required: ['old_string', 'new_string'],
+          },
+          description: 'Ordered list of edits to apply',
+        },
+      },
+      required: ['path', 'edits'],
+    },
+  },
+  {
     name: 'glob',
     description: 'Find files matching a glob pattern, e.g. "src/**/*.ts". Returns up to 200 paths.',
     input_schema: {
@@ -354,6 +379,75 @@ async function editFileTool(ctx: ToolContext, input: any): Promise<string> {
   return `Edited ${display}`;
 }
 
+async function multiEditFileTool(ctx: ToolContext, input: any): Promise<string> {
+  const { abs, outside, display } = resolvePath(ctx.workspaceRoot, input.path);
+  const edits = Array.isArray(input.edits) ? input.edits : [];
+  if (edits.length === 0) {
+    throw new Error('edits must be a non-empty array.');
+  }
+  const raw = await fs.readFile(abs, 'utf8');
+  let content = raw;
+  const summary: string[] = [];
+  for (const [i, edit] of edits.entries()) {
+    const oldStr = String(edit.old_string);
+    const newStr = String(edit.new_string);
+    if (!content.includes(oldStr)) {
+      throw new Error(`old_string not found for edit ${i + 1}. Read the file and match the content exactly.`);
+    }
+    if (edit.replace_all) {
+      content = content.split(oldStr).join(newStr);
+    } else {
+      const count = content.split(oldStr).length - 1;
+      if (count > 1) {
+        throw new Error(
+          `old_string for edit ${i + 1} appears ${count} times. Add surrounding context to make it unique, or set replace_all.`
+        );
+      }
+      content = content.replace(oldStr, newStr);
+    }
+    summary.push(`- ${preview(oldStr)}\n+ ${preview(newStr)}`);
+  }
+  const ok = outside
+    ? await ctx.requestEditApproval(
+        {
+          kind: 'outside-write',
+          key: `write:${path.dirname(abs)}`,
+          title: 'Edit a file outside the workspace',
+          detail: `${abs}\n${summary.join('\n')}`,
+        },
+        raw,
+        content,
+        abs,
+        true
+      )
+    : await ctx.requestEditApproval(
+        {
+          kind: 'edit',
+          key: 'workspace-edits',
+          title: `Edit ${display} (${edits.length} edits)`,
+          detail: summary.join('\n'),
+        },
+        raw,
+        content,
+        abs,
+        true
+      );
+  if (!ok) {
+    throw new Error(DENIED);
+  }
+  await fs.writeFile(abs, content, 'utf8');
+  ctx.memory.noteChange({
+    taskId: ctx.taskId,
+    taskSummary: ctx.taskSummary,
+    path: display,
+    tool: 'multi_edit_file',
+    before: preview(raw, 300),
+    after: preview(content, 300),
+  });
+  ctx.readCache.set(display, fileHash(content));
+  return `Edited ${display} (${edits.length} edits)`;
+}
+
 async function globTool(_ctx: ToolContext, input: any): Promise<string> {
   const uris = await vscode.workspace.findFiles(String(input.pattern), '**/node_modules/**', 200);
   if (uris.length === 0) {
@@ -471,6 +565,7 @@ const EXECUTORS: Record<string, (ctx: ToolContext, input: any) => Promise<string
   read_file: readFileTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
+  multi_edit_file: multiEditFileTool,
   glob: globTool,
   grep: grepTool,
   run_command: runCommandTool,
