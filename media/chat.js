@@ -12,6 +12,7 @@
   const modelEl = document.getElementById('session-model');
   const costEl = document.getElementById('session-cost');
   const taskEl = document.getElementById('task-line');
+const memoryBannerEl = document.getElementById('memory-banner');
   const commandMenuEl = document.getElementById('command-menu');
 
   /** The assistant bubble currently being streamed into, if any. */
@@ -521,6 +522,14 @@
       }
       case 'notice':
         addMsg('notice', msg.text);
+        break;
+      case 'memoryPending':
+        if (msg.active) {
+          memoryBannerEl.textContent = msg.text || 'Memory action pending…';
+          memoryBannerEl.classList.remove('hidden');
+        } else {
+          memoryBannerEl.classList.add('hidden');
+        }
         break;
       case 'setupNeeded': {
         streamEl = null;

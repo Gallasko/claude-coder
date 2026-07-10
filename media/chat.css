@@ -44,6 +44,16 @@ body {
   text-overflow: ellipsis;
 }
 
+#memory-banner {
+  padding: 2px 8px;
+  font-size: 0.85em;
+  background: var(--vscode-inputValidation-warningBackground);
+  border: 1px solid var(--vscode-inputValidation-warningBorder);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 #messages {
   flex: 1;
   overflow-y: auto;

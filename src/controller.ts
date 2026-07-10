@@ -899,6 +899,13 @@ export class Controller {
       resolver('no');
     }
     this.permissionResolvers.clear();
+    // Same for pending question cards — an unresolved ask_question keeps the
+    // tool execution awaiting forever, so the turn never unwinds and the
+    // controller stays busy until reload.
+    for (const resolver of this.questionResolvers.values()) {
+      resolver({});
+    }
+    this.questionResolvers.clear();
     this.abort?.abort();
   }
 
@@ -1918,6 +1925,7 @@ export class Controller {
     if (!this.summaryStore || session.turns === 0 || session.turns === this.lastArchivedTurns.get(sessionKey)) {
       return;
     }
+    this.post({ type: 'memoryPending', active: true, text: 'Saving to memory…' });
     try {
       const client = await this.tryGetClient();
       const result = await summarizeSession(client, this.tryWorkspaceRoot(), session);
@@ -1934,6 +1942,8 @@ export class Controller {
       this.post({ type: 'notice', text: 'Saved to memory.' });
     } catch (e: any) {
       this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
+    } finally {
+      this.post({ type: 'memoryPending', active: false });
     }
   }
 
