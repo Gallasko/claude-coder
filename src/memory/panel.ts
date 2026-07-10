@@ -42,9 +42,11 @@ export interface MemoryPanelData {
 /** Singleton webview panel showing project memory: task memories, notes, edit history, and the file-read cache. */
 export class MemoryPanel {
   private static current: MemoryPanel | undefined;
+  private static onReload: ((path: string) => void) | undefined;
   private readonly panel: vscode.WebviewPanel;
 
-  static show(data: MemoryPanelData): void {
+  static show(data: MemoryPanelData, onReload?: (path: string) => void): void {
+    MemoryPanel.onReload = onReload;
     if (MemoryPanel.current) {
       MemoryPanel.current.panel.reveal(vscode.ViewColumn.Active);
       MemoryPanel.current.render(data);
@@ -58,10 +60,15 @@ export class MemoryPanel {
       'claudeCoder.memory',
       'Claude Coder: Project Memory',
       vscode.ViewColumn.Active,
-      { enableScripts: false, retainContextWhenHidden: true }
+      { enableScripts: true, retainContextWhenHidden: true }
     );
     this.panel.onDidDispose(() => {
       MemoryPanel.current = undefined;
+    });
+    this.panel.webview.onDidReceiveMessage((msg) => {
+      if (msg?.type === 'reload' && typeof msg.path === 'string') {
+        MemoryPanel.onReload?.(msg.path);
+      }
     });
     this.render(data);
   }
@@ -103,14 +110,19 @@ export class MemoryPanel {
       )
       .join('');
     const summaryLines = fileSummaries
-      .map((s) => `<li><span class="tag tag-${esc(s.status)}">${esc(s.status)}</span> ${esc(s.path)} — ${esc(s.summary)}</li>`)
+      .map(
+        (s) =>
+          `<li><span class="tag tag-${esc(s.status)}">${esc(s.status)}</span> ${esc(s.path)} — ${esc(s.summary)} <button class="reload" data-path="${esc(s.path)}">Reload</button></li>`
+      )
       .join('');
+
+    const nonce = String(Date.now()) + Math.floor(Math.random() * 1e9);
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
     body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; }
@@ -134,6 +146,8 @@ export class MemoryPanel {
     .memory-files code { background: var(--vscode-textCodeBlock-background); border-radius: 3px; padding: 1px 4px; margin-right: 4px; display: inline-block; margin-bottom: 2px; }
     .memory-files code.stale { outline: 1px solid var(--vscode-testing-iconQueued, #c90); }
     .stale-note { font-size: 11px; color: var(--vscode-testing-iconQueued, #c90); margin-top: 4px; }
+    button.reload { font-size: 10px; margin-left: 6px; padding: 0 6px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; }
+    button.reload:hover { background: var(--vscode-button-secondaryHoverBackground); }
   </style>
 </head>
 <body>
@@ -149,11 +163,21 @@ export class MemoryPanel {
 
   <h2>File summaries (read cache)</h2>
   ${fileSummaries.length ? `<ul>${summaryLines}</ul>` : '<p class="empty">No cached file summaries.</p>'}
+
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button.reload');
+      if (btn) {
+        vscode.postMessage({ type: 'reload', path: btn.dataset.path });
+      }
+    });
+  </script>
 </body>
 </html>`;
   }
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
+  return s.replace(/[&<>"]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&quot;'));
 }

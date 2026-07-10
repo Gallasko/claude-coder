@@ -1144,7 +1144,30 @@ export class Controller {
         }))
       : [];
 
-    MemoryPanel.show({ notes, changes, fileSummaries, taskMemories, root });
+    MemoryPanel.show({ notes, changes, fileSummaries, taskMemories, root }, (p) => void this.reloadCachedFile(p));
+  }
+
+  /** Manually refreshes a single file's read-cache summary (Memory panel "Reload" button). */
+  private async reloadCachedFile(filePath: string): Promise<void> {
+    const memory = await this.ensureMemory();
+    const root = this.tryWorkspaceRoot();
+    const abs = root ? (path.isAbsolute(filePath) ? filePath : path.join(root, filePath)) : filePath;
+    try {
+      const content = await fs.readFile(abs, 'utf8');
+      const stat = await fs.stat(abs);
+      const client = await this.tryGetClient();
+      const summary = await this.summarizeFileForMemory(client, filePath, content);
+      if (summary) {
+        memory.saveSummary(filePath, stat.mtimeMs, stat.size, summary);
+      }
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') {
+        memory.forgetFile(filePath);
+      } else {
+        this.log.appendLine(`[memory reload error] ${e?.message ?? e}`);
+      }
+    }
+    await this.showMemory();
   }
 
   /** Freshness label for a cached file summary — stats the file, doesn't re-read its content. */
