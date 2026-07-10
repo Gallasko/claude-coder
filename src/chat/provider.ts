@@ -96,8 +96,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button id="btn-history" title="Show all chats & sessions">History</button>
   </div>
   <div id="task-line"></div>
-  <div id="memory-banner" class="hidden"></div>
   <div id="messages"></div>
+  <div id="memory-banner" class="hidden"></div>
   <div id="composer">
     <div id="command-menu" class="hidden"></div>
     <textarea id="input" rows="3" placeholder="Ask Claude to do something in this workspace… (try /)"></textarea>
