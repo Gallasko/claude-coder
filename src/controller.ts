@@ -1003,12 +1003,17 @@ export class Controller {
         });
         this.postSessionInfo();
         this.updateStatusBar();
+        // Create the chat-history record before planning so plan-cost usage
+        // (planIfNeeded records against fresh.id) isn't dropped by addUsage's
+        // no-op-on-unknown-id guard.
+        this.ensureChatRecord(fresh, text);
         const planApproved = await this.planIfNeeded(client, fresh, c.complexity, text);
         return { session: fresh, planApproved };
       }
       if (session.turns === 0) {
         session.taskSummary = c.summary;
         session.effort = EFFORT_BY_COMPLEXITY[c.complexity];
+        this.ensureChatRecord(session, text);
         const planApproved = await this.planIfNeeded(client, session, c.complexity, text);
         return { session, planApproved };
       }
@@ -1121,6 +1126,15 @@ export class Controller {
             cacheWriteTokens: subResult.usage.cacheWriteTokens,
             costUsd: subResult.estValueUsd,
           });
+          this.chatHistoryStore?.addUsage(session.id, {
+            backend: 'subscription',
+            inputTokens: subResult.usage.inputTokens,
+            outputTokens: subResult.usage.outputTokens,
+            cacheReadTokens: subResult.usage.cacheReadTokens,
+            cacheWriteTokens: subResult.usage.cacheWriteTokens,
+            costUsd: subResult.estValueUsd,
+            assistantChars: 0,
+          });
           noticeText = `Plan drafted by ${displayName(model)} on your subscription (no credits)${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (plan value ~${formatUsd(subResult.estValueUsd)}):\n${summarizePlan(plan)}`;
         } else {
           this.log.appendLine(`[sub planner fallback] ${subResult.errorText ?? 'no plan produced'}`);
@@ -1149,6 +1163,15 @@ export class Controller {
           cacheReadTokens: totals.cacheReadTokens,
           cacheWriteTokens: totals.cacheWriteTokens,
           costUsd: costUsd(totals, model),
+        });
+        this.chatHistoryStore?.addUsage(session.id, {
+          backend: 'credits',
+          inputTokens: totals.inputTokens,
+          outputTokens: totals.outputTokens,
+          cacheReadTokens: totals.cacheReadTokens,
+          cacheWriteTokens: totals.cacheWriteTokens,
+          costUsd: costUsd(totals, model),
+          assistantChars: 0,
         });
         plan = creditsResult.plan;
         toolCalls = creditsResult.toolCalls;
@@ -1715,6 +1738,15 @@ export class Controller {
         cacheWriteTokens: result.usage.cacheWriteTokens,
         costUsd: result.estValueUsd,
       });
+      this.chatHistoryStore?.addUsage(sessionId, {
+        backend: 'subscription',
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        costUsd: result.estValueUsd,
+        assistantChars: 0,
+      });
     } else {
       addUsage(this.classifierTotals, {
         input_tokens: result.usage.inputTokens,
@@ -1732,6 +1764,15 @@ export class Controller {
         cacheReadTokens: result.usage.cacheReadTokens,
         cacheWriteTokens: result.usage.cacheWriteTokens,
         costUsd: costUsd({ ...result.usage, requests: 1 }, CLASSIFIER_MODEL),
+      });
+      this.chatHistoryStore?.addUsage(sessionId, {
+        backend: 'credits',
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        costUsd: costUsd({ ...result.usage, requests: 1 }, CLASSIFIER_MODEL),
+        assistantChars: 0,
       });
     }
   }
