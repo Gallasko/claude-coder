@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.33",
+  "version": "0.1.34",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -206,6 +206,11 @@
           "type": "number",
           "default": 100000,
           "description": "When a request's input exceeds this, suggest starting a new session."
+        },
+        "claudeCoder.rateLimitWarnThreshold": {
+          "type": "number",
+          "default": 80,
+          "description": "Show a warning notification when a subscription plan rate-limit window reaches this % utilization. Set to 0 to disable."
         }
       }
     }

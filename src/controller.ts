@@ -82,6 +82,7 @@ export class Controller {
    *  Pro/Max plan, not to API credits. estValue is API-equivalent USD. */
   private subTotals: UsageTotals = emptyTotals();
   private subValueUsd = 0;
+  private warnedRateLimitWindows = new Set<string>();
   private abort: AbortController | undefined;
   private ui: UiSink | undefined;
   private statusBar: vscode.StatusBarItem;
@@ -300,6 +301,10 @@ export class Controller {
 
   private subscriptionModel(): string {
     return this.config().get<string>('subscriptionModel') ?? 'sonnet';
+  }
+
+  private rateLimitWarnThreshold(): number {
+    return this.config().get<number>('rateLimitWarnThreshold') ?? 80;
   }
 
   /** Maps a planning-ladder API model id to the subscription CLI's model alias, or undefined if the CLI has no equivalent (e.g. Fable). */
@@ -979,7 +984,33 @@ export class Controller {
     );
     this.updateStatusBar();
     this.postSessionInfo();
+    this.checkRateLimitWarning(result);
     return result;
+  }
+
+  /** Warns via a chat notice when a plan rate-limit window crosses the configured threshold. */
+  private checkRateLimitWarning(result: SubscriptionTurnResult): void {
+    const threshold = this.rateLimitWarnThreshold();
+    if (threshold <= 0 || !result.rateLimit?.windows) {
+      return;
+    }
+    for (const w of result.rateLimit.windows) {
+      if (w.utilization == null) {
+        continue;
+      }
+      if (w.utilization >= threshold) {
+        if (!this.warnedRateLimitWindows.has(w.label)) {
+          this.warnedRateLimitWindows.add(w.label);
+          const resets = w.resetsAt ? new Date(w.resetsAt).toLocaleString() : 'unknown';
+          this.post({
+            type: 'notice',
+            text: `⚠️ Claude plan usage: ${w.label} at ${Math.round(w.utilization)}% (resets ${resets})`,
+          });
+        }
+      } else {
+        this.warnedRateLimitWindows.delete(w.label);
+      }
+    }
   }
 
   /** Chat card asking whether to restart the task on the credits tier. */
