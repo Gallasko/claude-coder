@@ -496,7 +496,7 @@ export class Controller {
     const choicePromise = new Promise<PermissionChoice>((resolve) => {
       this.permissionResolvers.set(id, resolve);
     });
-    const planFile = await this.openPlanInEditor(plan);
+    const planFile = await withTransientRetry(() => this.openPlanInEditor(plan));
     this.post({ type: 'permission', id, kind: 'plan', title: 'Plan ready — proceed with implementation?', detail: plan });
     const choice = await choicePromise;
     this.permissionResolvers.delete(id);
@@ -2111,6 +2111,30 @@ export class Controller {
  * plan can't access. Any other error (auth, bad request, etc.) surfaces
  * normally instead of silently spending credits.
  */
+const TRANSIENT_UI_ERROR_PATTERN = /ECONNRESET|EPIPE|ETIMEDOUT|socket hang up|closed|disconnect|connection|stream/i;
+
+/**
+ * Opening the plan file (openTextDocument/showTextDocument) crosses the
+ * extension-host <-> renderer RPC stream, which can drop transiently
+ * (especially remote/SSH windows) right as a chat turn hands off into plan
+ * mode. Retry only on that class of error — a real failure (bad path,
+ * permissions) should surface immediately, not get masked by retries.
+ */
+async function withTransientRetry<T>(op: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt >= attempts || !TRANSIENT_UI_ERROR_PATTERN.test(message)) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  throw new Error('unreachable');
+}
+
 function isUsageLimitOrModelError(errorText: string | undefined): boolean {
   if (!errorText) {
     return false;
