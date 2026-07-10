@@ -37,6 +37,12 @@ export interface UsageSummary {
 
 export type Granularity = 'hour' | 'day' | 'week';
 
+export interface BucketModelSlice {
+  model: string;
+  requests: number;
+  costUsd: number;
+}
+
 export interface Bucket {
   /** Human-readable label for this bucket's start, in local time. */
   key: string;
@@ -44,6 +50,8 @@ export interface Bucket {
   start: number;
   requests: number;
   costUsd: number;
+  /** Per-model breakdown of this bucket, for stacked-bar rendering. */
+  models: BucketModelSlice[];
 }
 
 const BUCKET_COUNT: Record<Granularity, number> = { hour: 24, day: 14, week: 8 };
@@ -144,7 +152,7 @@ export class UsageStore {
 
     const byStart = new Map<number, Bucket>();
     for (const s of starts) {
-      byStart.set(s, { key: bucketLabel(s, granularity), start: s, requests: 0, costUsd: 0 });
+      byStart.set(s, { key: bucketLabel(s, granularity), start: s, requests: 0, costUsd: 0, models: [] });
     }
 
     const minStart = starts[0];
@@ -156,6 +164,13 @@ export class UsageStore {
       if (bucket) {
         bucket.requests += 1;
         bucket.costUsd += r.costUsd;
+        let slice = bucket.models.find((m) => m.model === r.model);
+        if (!slice) {
+          slice = { model: r.model, requests: 0, costUsd: 0 };
+          bucket.models.push(slice);
+        }
+        slice.requests += 1;
+        slice.costUsd += r.costUsd;
       }
     }
 

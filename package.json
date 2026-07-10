@@ -1,200 +1,198 @@
 {
-    "name":  "claude-coder",
-    "displayName":  "Claude Coder",
-    "description":  "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-    "version":  "0.1.19",
-    "publisher":  "corse",
-    "private":  true,
-    "engines":  {
-                    "vscode":  "^1.90.0"
-                },
-    "categories":  [
-                       "AI",
-                       "Programming Languages"
-                   ],
-    "main":  "./dist/extension.js",
-    "activationEvents":  [
-
-                         ],
-    "contributes":  {
-                        "viewsContainers":  {
-                                                "activitybar":  [
-                                                                    {
-                                                                        "id":  "claudeCoder",
-                                                                        "title":  "Claude Coder",
-                                                                        "icon":  "media/icon.svg"
-                                                                    }
-                                                                ]
-                                            },
-                        "views":  {
-                                      "claudeCoder":  [
-                                                          {
-                                                              "type":  "webview",
-                                                              "id":  "claudeCoder.chat",
-                                                              "name":  "Chat"
-                                                          }
-                                                      ]
-                                  },
-                        "commands":  [
-                                         {
-                                             "command":  "claudeCoder.newTask",
-                                             "title":  "Claude Coder: New Task (reset session)"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.setup",
-                                             "title":  "Claude Coder: Setup (subscription or API key)"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.setApiKey",
-                                             "title":  "Claude Coder: Set API Key"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.escalate",
-                                             "title":  "Claude Coder: Escalate Task to Bigger Model"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.showCosts",
-                                             "title":  "Claude Coder: Show Session Costs"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.showUsageHistory",
-                                             "title":  "Claude Coder: Show Usage History \u0026 Billing"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.showMemory",
-                                             "title":  "Claude Coder: Show Project Memory (recent changes)"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.addMemoryNote",
-                                             "title":  "Claude Coder: Add Project Memory Note"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.showChatHistory",
-                                             "title":  "Claude Coder: Show Chat History"
-                                         },
-                                         {
-                                             "command":  "claudeCoder.resetPermissions",
-                                             "title":  "Claude Coder: Reset \"Always Allow\" Permissions"
-                                         }
-                                     ],
-                        "configuration":  {
-                                              "title":  "Claude Coder",
-                                              "properties":  {
-                                                                 "claudeCoder.modelLadder":  {
-                                                                                                 "type":  "array",
-                                                                                                 "items":  {
-                                                                                                               "type":  "string"
-                                                                                                           },
-                                                                                                 "default":  [
-                                                                                                                 "claude-sonnet-5",
-                                                                                                                 "claude-opus-4-8",
-                                                                                                                 "claude-fable-5"
-                                                                                                             ],
-                                                                                                 "description":  "Escalation ladder, cheapest first. Escalation restarts the task on the next model."
-                                                                                             },
-                                                                 "claudeCoder.autoTaskDetection":  {
-                                                                                                       "type":  "boolean",
-                                                                                                       "default":  true,
-                                                                                                       "description":  "Use a cheap Haiku call to detect task changes and auto-reset the session."
-                                                                                                   },
-                                                                 "claudeCoder.useSubscription":  {
-                                                                                                     "type":  "boolean",
-                                                                                                     "default":  true,
-                                                                                                     "description":  "Run tasks through the Claude Agent SDK using your Claude Code login (Pro/Max plan) instead of API credits. Planning, classification and escalations still use credits. Requires Claude Code installed and logged in."
-                                                                                                 },
-                                                                 "claudeCoder.subscriptionModel":  {
-                                                                                                       "type":  "string",
-                                                                                                       "default":  "sonnet",
-                                                                                                       "description":  "Model alias for the subscription backend (sonnet | opus | haiku, or a full model id your plan supports)."
-                                                                                                   },
-                                                                 "claudeCoder.planningEnabled":  {
-                                                                                                     "type":  "boolean",
-                                                                                                     "default":  true,
-                                                                                                     "description":  "Draft a short plan on the reasoning tier (Opus/Fable) before Sonnet implements it, for standard/hard tasks."
-                                                                                                 },
-                                                                 "claudeCoder.requirePlanApproval":  {
-                                                                                                         "type":  "boolean",
-                                                                                                         "default":  true,
-                                                                                                         "description":  "Pause and ask for approval before implementing a drafted plan. Only applies when planningEnabled is on and a plan was drafted."
-                                                                                                     },
-                                                                 "claudeCoder.planningModelLadder":  {
-                                                                                                         "type":  "array",
-                                                                                                         "items":  {
-                                                                                                                       "type":  "string"
-                                                                                                                   },
-                                                                                                         "default":  [
-                                                                                                                         "claude-opus-4-8",
-                                                                                                                         "claude-fable-5"
-                                                                                                                     ],
-                                                                                                         "description":  "Planning model by complexity: index 0 for standard tasks, index 1 for hard tasks."
-                                                                                                     },
-                                                                 "claudeCoder.planningMaxTokens":  {
-                                                                                                       "type":  "number",
-                                                                                                       "default":  1024,
-                                                                                                       "description":  "Hard cap on the planning call\u0027s output tokens (the reasoning tier is the most expensive per token)."
-                                                                                                   },
-                                                                 "claudeCoder.compressLongPrompts":  {
-                                                                                                         "type":  "boolean",
-                                                                                                         "default":  false,
-                                                                                                         "description":  "Use Haiku to shrink long, prose-heavy prompts (pasted logs/specs) before sending them to the main model. Off by default: it rewrites your own wording."
-                                                                                                     },
-                                                                 "claudeCoder.compressionThresholdChars":  {
-                                                                                                               "type":  "number",
-                                                                                                               "default":  4000,
-                                                                                                               "description":  "Only compress prompts longer than this (characters)."
-                                                                                                           },
-                                                                 "claudeCoder.autoCompact":  {
-                                                                                                 "type":  "boolean",
-                                                                                                 "default":  true,
-                                                                                                 "description":  "When a session\u0027s context passes compactionThresholdTokens, use Haiku to summarize the transcript and keep going instead of just warning."
-                                                                                             },
-                                                                 "claudeCoder.compactionMaxTokens":  {
-                                                                                                         "type":  "number",
-                                                                                                         "default":  800,
-                                                                                                         "description":  "Output cap on the auto-compaction summary."
-                                                                                                     },
-                                                                 "claudeCoder.autoApproveCommands":  {
-                                                                                                         "type":  "boolean",
-                                                                                                         "default":  false,
-                                                                                                         "description":  "Run shell commands without asking for confirmation (risky)."
-                                                                                                     },
-                                                                 "claudeCoder.minimizeOutputTokens":  {
-                                                                                                          "type":  "boolean",
-                                                                                                          "default":  true,
-                                                                                                          "description":  "Produce as few output tokens as possible: effort is clamped to \u0027low\u0027, extended thinking is disabled, and the model is instructed to work silently with terse edits and a one-sentence final answer. Output tokens cost 5x input."
-                                                                                                      },
-                                                                 "claudeCoder.maxTokens":  {
-                                                                                               "type":  "number",
-                                                                                               "default":  32000,
-                                                                                               "description":  "max_tokens per response (streaming)."
-                                                                                           },
-                                                                 "claudeCoder.compactionThresholdTokens":  {
-                                                                                                               "type":  "number",
-                                                                                                               "default":  100000,
-                                                                                                               "description":  "When a request\u0027s input exceeds this, suggest starting a new session."
-                                                                                                           }
-                                                             }
-                                          }
-                    },
-    "scripts":  {
-                    "build":  "node esbuild.js",
-                    "vscode:prepublish":  "node esbuild.js",
-                    "watch":  "node esbuild.js --watch",
-                    "typecheck":  "tsc --noEmit",
-                    "package":  "vsce package",
-                    "bump":  "bash scripts/bump-and-reinstall.sh",
-                    "bump:win":  "powershell -ExecutionPolicy Bypass -File scripts/bump-and-reinstall.ps1"
-                },
-    "dependencies":  {
-                         "@anthropic-ai/claude-agent-sdk":  "^0.3.201",
-                         "@anthropic-ai/sdk":  "latest",
-                         "zod":  "^4.4.3"
-                     },
-    "devDependencies":  {
-                            "@types/node":  "^22.0.0",
-                            "@types/vscode":  "^1.90.0",
-                            "@vscode/vsce":  "^3.0.0",
-                            "esbuild":  "^0.24.0",
-                            "typescript":  "^5.6.0"
-                        }
+  "name": "claude-coder",
+  "displayName": "Claude Coder",
+  "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
+  "version": "0.1.20",
+  "publisher": "corse",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeCoder",
+          "title": "Claude Coder",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeCoder": [
+        {
+          "type": "webview",
+          "id": "claudeCoder.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeCoder.newTask",
+        "title": "Claude Coder: New Task (reset session)"
+      },
+      {
+        "command": "claudeCoder.setup",
+        "title": "Claude Coder: Setup (subscription or API key)"
+      },
+      {
+        "command": "claudeCoder.setApiKey",
+        "title": "Claude Coder: Set API Key"
+      },
+      {
+        "command": "claudeCoder.escalate",
+        "title": "Claude Coder: Escalate Task to Bigger Model"
+      },
+      {
+        "command": "claudeCoder.showCosts",
+        "title": "Claude Coder: Show Session Costs"
+      },
+      {
+        "command": "claudeCoder.showUsageHistory",
+        "title": "Claude Coder: Show Usage History & Billing"
+      },
+      {
+        "command": "claudeCoder.showMemory",
+        "title": "Claude Coder: Show Project Memory (recent changes)"
+      },
+      {
+        "command": "claudeCoder.addMemoryNote",
+        "title": "Claude Coder: Add Project Memory Note"
+      },
+      {
+        "command": "claudeCoder.showChatHistory",
+        "title": "Claude Coder: Show Chat History"
+      },
+      {
+        "command": "claudeCoder.resetPermissions",
+        "title": "Claude Coder: Reset \"Always Allow\" Permissions"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Coder",
+      "properties": {
+        "claudeCoder.modelLadder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-fable-5"
+          ],
+          "description": "Escalation ladder, cheapest first. Escalation restarts the task on the next model."
+        },
+        "claudeCoder.autoTaskDetection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use a cheap Haiku call to detect task changes and auto-reset the session."
+        },
+        "claudeCoder.useSubscription": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run tasks through the Claude Agent SDK using your Claude Code login (Pro/Max plan) instead of API credits. Planning, classification and escalations still use credits. Requires Claude Code installed and logged in."
+        },
+        "claudeCoder.subscriptionModel": {
+          "type": "string",
+          "default": "sonnet",
+          "description": "Model alias for the subscription backend (sonnet | opus | haiku, or a full model id your plan supports)."
+        },
+        "claudeCoder.planningEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Draft a short plan on the reasoning tier (Opus/Fable) before Sonnet implements it, for standard/hard tasks."
+        },
+        "claudeCoder.requirePlanApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pause and ask for approval before implementing a drafted plan. Only applies when planningEnabled is on and a plan was drafted."
+        },
+        "claudeCoder.planningModelLadder": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude-opus-4-8",
+            "claude-fable-5"
+          ],
+          "description": "Planning model by complexity: index 0 for standard tasks, index 1 for hard tasks."
+        },
+        "claudeCoder.planningMaxTokens": {
+          "type": "number",
+          "default": 1024,
+          "description": "Hard cap on the planning call's output tokens (the reasoning tier is the most expensive per token)."
+        },
+        "claudeCoder.compressLongPrompts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Haiku to shrink long, prose-heavy prompts (pasted logs/specs) before sending them to the main model. Off by default: it rewrites your own wording."
+        },
+        "claudeCoder.compressionThresholdChars": {
+          "type": "number",
+          "default": 4000,
+          "description": "Only compress prompts longer than this (characters)."
+        },
+        "claudeCoder.autoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a session's context passes compactionThresholdTokens, use Haiku to summarize the transcript and keep going instead of just warning."
+        },
+        "claudeCoder.compactionMaxTokens": {
+          "type": "number",
+          "default": 800,
+          "description": "Output cap on the auto-compaction summary."
+        },
+        "claudeCoder.autoApproveCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run shell commands without asking for confirmation (risky)."
+        },
+        "claudeCoder.minimizeOutputTokens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Produce as few output tokens as possible: effort is clamped to 'low', extended thinking is disabled, and the model is instructed to work silently with terse edits and a one-sentence final answer. Output tokens cost 5x input."
+        },
+        "claudeCoder.maxTokens": {
+          "type": "number",
+          "default": 32000,
+          "description": "max_tokens per response (streaming)."
+        },
+        "claudeCoder.compactionThresholdTokens": {
+          "type": "number",
+          "default": 100000,
+          "description": "When a request's input exceeds this, suggest starting a new session."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "vscode:prepublish": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package",
+    "bump": "bash scripts/bump-and-reinstall.sh",
+    "bump:win": "powershell -ExecutionPolicy Bypass -File scripts/bump-and-reinstall.ps1"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.201",
+    "@anthropic-ai/sdk": "latest",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
 }

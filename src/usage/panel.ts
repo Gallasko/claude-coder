@@ -1,6 +1,30 @@
 import * as vscode from 'vscode';
 import { UsageStore } from '../agent/usageStore';
-import { displayName, formatUsd } from '../agent/models';
+import { displayName, formatUsd, PRICING } from '../agent/models';
+
+/**
+ * Fixed categorical slots (validated for CVD-safe adjacent separation in both
+ * light and dark VS Code themes). Assigned in this order, never cycled per
+ * filter — known models first (matching PRICING key order), then any unknown
+ * model IDs by first appearance.
+ */
+const MODEL_COLOR_SLOTS: { light: string; dark: string }[] = [
+  { light: '#2a78d6', dark: '#3987e5' }, // blue
+  { light: '#1baf7a', dark: '#199e70' }, // aqua
+  { light: '#eda100', dark: '#c98500' }, // yellow
+  { light: '#008300', dark: '#008300' }, // green
+  { light: '#4a3aa7', dark: '#9085e9' }, // violet
+  { light: '#e34948', dark: '#e66767' }, // red
+  { light: '#e87ba4', dark: '#d55181' }, // magenta
+  { light: '#eb6834', dark: '#d95926' }, // orange
+];
+
+/** Assigns each model a stable color slot: known models in PRICING order, then extras by first appearance. */
+function modelColorOrder(models: string[]): string[] {
+  const known = Object.keys(PRICING);
+  const extras = models.filter((m) => !known.includes(m));
+  return [...known, ...extras];
+}
 
 /** Singleton webview panel showing persisted usage history + billing estimate. */
 export class UsagePanel {
@@ -48,6 +72,21 @@ export class UsagePanel {
       day: this.store.buckets('day'),
       week: this.store.buckets('week'),
     };
+
+    const modelOrder = modelColorOrder(s.byModel.map((m) => m.key));
+    const modelColors: Record<string, { light: string; dark: string }> = {};
+    modelOrder.forEach((m, i) => {
+      modelColors[m] = MODEL_COLOR_SLOTS[i % MODEL_COLOR_SLOTS.length];
+    });
+
+    const legendRows = s.byModel
+      .map(
+        (m) =>
+          `<div class="legend-item"><span class="legend-swatch" style="--legend-light:${
+            modelColors[m.key].light
+          };--legend-dark:${modelColors[m.key].dark}"></span>${esc(displayName(m.key))}</div>`
+      )
+      .join('');
 
     const dayRows = s.byDay
       .map(
@@ -104,8 +143,14 @@ export class UsagePanel {
     .graph-controls button.active { opacity: 1; }
     .graph { display: flex; align-items: flex-end; gap: 2px; height: 140px; border-bottom: 1px solid var(--vscode-widget-border); padding: 0 4px; }
     .graph-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 2px; }
-    .graph-bar .bar { width: 100%; background: var(--vscode-button-background); border-radius: 2px 2px 0 0; min-height: 1px; }
+    .graph-bar .bar { width: 100%; display: flex; flex-direction: column-reverse; border-radius: 2px 2px 0 0; min-height: 1px; overflow: hidden; }
+    .graph-bar .bar-segment { width: 100%; }
+    .graph-bar .bar-segment + .bar-segment { border-top: 1px solid var(--vscode-editorWidget-background); }
     .graph-bar .bar-label { font-size: 9px; opacity: 0.7; margin-top: 4px; white-space: nowrap; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+    .legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--legend-light); }
+    body.vscode-dark .legend-swatch, body.vscode-high-contrast .legend-swatch { background: var(--legend-dark); }
   </style>
 </head>
 <body>
@@ -127,7 +172,8 @@ export class UsagePanel {
            <button class="gran-btn" data-gran="day">Day</button>
            <button class="gran-btn" data-gran="week">Week</button>
          </div>
-         <div id="graph" class="graph"></div>`
+         <div id="graph" class="graph"></div>
+         <div class="legend">${legendRows}</div>`
       : '<p class="empty">No usage recorded yet.</p>'
   }
 
@@ -163,6 +209,14 @@ export class UsagePanel {
     });
 
     const graphData = ${JSON.stringify(graphData)};
+    const modelOrder = ${JSON.stringify(modelOrder)};
+    const modelColors = ${JSON.stringify(modelColors)};
+
+    function colorFor(model) {
+      const c = modelColors[model] || modelColors[modelOrder[modelOrder.length - 1]];
+      const dark = document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast');
+      return dark ? c.dark : c.light;
+    }
 
     function renderGraph(gran) {
       const graphEl = document.getElementById('graph');
@@ -186,7 +240,20 @@ export class UsagePanel {
         const value = useCost ? b.costUsd : b.requests;
         const pct = max > 0 ? Math.max((value / max) * 100, value > 0 ? 2 : 0) : 0;
         bar.style.height = pct + '%';
-        bar.title = b.key + ': ' + b.requests + ' req, $' + b.costUsd.toFixed(4);
+
+        const slices = modelOrder
+          .map((model) => b.models.find((m) => m.model === model))
+          .filter(Boolean);
+        (slices.length ? slices : [{ model: modelOrder[0], requests: 0, costUsd: 0 }]).forEach((slice) => {
+          const seg = document.createElement('div');
+          seg.className = 'bar-segment';
+          const segValue = useCost ? slice.costUsd : slice.requests;
+          seg.style.flexGrow = String(Math.max(segValue, slices.length ? 0.0001 : 1));
+          seg.style.background = colorFor(slice.model);
+          seg.title = b.key + ' - ' + slice.model + ': ' + slice.requests + ' req, $' + slice.costUsd.toFixed(4);
+          bar.appendChild(seg);
+        });
+
         col.appendChild(bar);
 
         const label = document.createElement('div');
