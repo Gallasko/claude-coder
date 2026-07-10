@@ -2,8 +2,11 @@ import * as vscode from 'vscode';
 import { Controller } from './controller';
 import { ChatViewProvider } from './chat/provider';
 
+let controllerRef: Controller | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
   const controller = new Controller(context);
+  controllerRef = controller;
   const provider = new ChatViewProvider(context.extensionUri, controller);
 
   context.subscriptions.push(
@@ -38,4 +41,6 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push({ dispose: () => clearInterval(taskMemoryPoll) });
 }
 
-export function deactivate(): void {}
+export async function deactivate(): Promise<void> {
+  await controllerRef?.flushMemoryOnClose();
+}

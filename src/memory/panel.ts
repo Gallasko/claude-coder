@@ -73,6 +73,10 @@ export class MemoryPanel {
     this.render(data);
   }
 
+  static notice(text: string): void {
+    void MemoryPanel.current?.panel.webview.postMessage({ type: 'notice', text });
+  }
+
   private render(data: MemoryPanelData): void {
     this.data = data;
     this.panel.webview.html = this.html();
@@ -148,6 +152,9 @@ export class MemoryPanel {
     .stale-note { font-size: 11px; color: var(--vscode-testing-iconQueued, #c90); margin-top: 4px; }
     button.reload { font-size: 10px; margin-left: 6px; padding: 0 6px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; }
     button.reload:hover { background: var(--vscode-button-secondaryHoverBackground); }
+    button.reload:disabled { opacity: 0.6; cursor: default; }
+    #toast { position: fixed; bottom: 16px; right: 16px; background: var(--vscode-notifications-background, #333); color: var(--vscode-notifications-foreground, #fff); border: 1px solid var(--vscode-widget-border); border-radius: 4px; padding: 8px 12px; font-size: 12px; opacity: 0; transform: translateY(8px); transition: opacity 0.15s ease, transform 0.15s ease; pointer-events: none; }
+    #toast.show { opacity: 1; transform: translateY(0); }
   </style>
 </head>
 <body>
@@ -164,12 +171,26 @@ export class MemoryPanel {
   <h2>File summaries (read cache)</h2>
   ${fileSummaries.length ? `<ul>${summaryLines}</ul>` : '<p class="empty">No cached file summaries.</p>'}
 
+  <div id="toast"></div>
+
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     document.addEventListener('click', (e) => {
       const btn = e.target.closest('button.reload');
       if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Reloading…';
         vscode.postMessage({ type: 'reload', path: btn.dataset.path });
+      }
+    });
+    let toastTimer;
+    window.addEventListener('message', (e) => {
+      if (e.data?.type === 'notice') {
+        const toast = document.getElementById('toast');
+        toast.textContent = e.data.text;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 2500);
       }
     });
   </script>

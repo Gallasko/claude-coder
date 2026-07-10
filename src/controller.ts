@@ -79,6 +79,11 @@ export class Controller {
   private statusBar: vscode.StatusBarItem;
   private log: vscode.OutputChannel;
   private busy = false;
+  /** Turn count at the time each session was last archived, so idle/commit/close
+   *  triggers don't re-archive a session that hasn't changed since. */
+  private lastArchivedTurns = new Map<string, number>();
+  private idleSaveTimer: NodeJS.Timeout | undefined;
+  private static readonly IDLE_SAVE_DELAY_MS = 2.5 * 60 * 1000;
 
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
   private permissionId = 0;
@@ -442,6 +447,7 @@ export class Controller {
     try {
       await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
       this.post({ type: 'notice', text: `Committed: ${commitMessage}` });
+      void this.archiveChat(this.sessions.current);
     } catch (e) {
       this.post({ type: 'notice', text: `Commit failed: ${describeError(e)}` });
     }
@@ -490,6 +496,7 @@ export class Controller {
       this.post({ type: 'notice', text: 'Still working — cancel first or wait.' });
       return;
     }
+    this.clearIdleSave();
     this.busy = true;
     this.abort = new AbortController();
     this.post({ type: 'accepted' });
@@ -777,6 +784,7 @@ export class Controller {
       this.busy = false;
       this.abort = undefined;
       this.updateStatusBar();
+      this.armIdleSave(this.sessions.current);
     }
   }
 
@@ -1158,6 +1166,7 @@ export class Controller {
     const memory = await this.ensureMemory();
     const root = this.tryWorkspaceRoot();
     const abs = root ? (path.isAbsolute(filePath) ? filePath : path.join(root, filePath)) : filePath;
+    let notice: string;
     try {
       const content = await fs.readFile(abs, 'utf8');
       const stat = await fs.stat(abs);
@@ -1165,15 +1174,21 @@ export class Controller {
       const summary = await this.summarizeFileForMemory(client, filePath, content);
       if (summary) {
         memory.saveSummary(filePath, stat.mtimeMs, stat.size, summary);
+        notice = 'Summary reloaded';
+      } else {
+        notice = 'Reload failed (see output)';
       }
     } catch (e: any) {
       if (e?.code === 'ENOENT') {
         memory.forgetFile(filePath);
+        notice = 'File no longer exists — removed from cache';
       } else {
         this.log.appendLine(`[memory reload error] ${e?.message ?? e}`);
+        notice = 'Reload failed (see output)';
       }
     }
     await this.showMemory();
+    MemoryPanel.notice(notice);
   }
 
   /** Freshness label for a cached file summary — stats the file, doesn't re-read its content. */
@@ -1639,8 +1654,35 @@ export class Controller {
    * "memory" for the project history view. Never blocks or throws — a
    * missed summary must not interrupt the task switch that triggered it.
    */
+  /** Arms a save that fires if the user hasn't replied within IDLE_SAVE_DELAY_MS
+   *  of the assistant finishing a turn. Reset on every new user message. */
+  private armIdleSave(session: Session): void {
+    this.clearIdleSave();
+    this.idleSaveTimer = setTimeout(() => {
+      this.idleSaveTimer = undefined;
+      if (!this.busy) {
+        void this.archiveChat(session);
+      }
+    }, Controller.IDLE_SAVE_DELAY_MS);
+  }
+
+  private clearIdleSave(): void {
+    if (this.idleSaveTimer) {
+      clearTimeout(this.idleSaveTimer);
+      this.idleSaveTimer = undefined;
+    }
+  }
+
+  /** Best-effort flush when the extension is shutting down, so an active,
+   *  unarchived chat isn't lost. */
+  async flushMemoryOnClose(): Promise<void> {
+    this.clearIdleSave();
+    await this.archiveChat(this.sessions.current);
+  }
+
   private async archiveChat(session: Session): Promise<void> {
-    if (!this.summaryStore || session.turns === 0) {
+    const sessionKey = String(session.id);
+    if (!this.summaryStore || session.turns === 0 || session.turns === this.lastArchivedTurns.get(sessionKey)) {
       return;
     }
     try {
@@ -1655,6 +1697,7 @@ export class Controller {
         highlights: result.data.highlights,
       });
       await this.upsertTaskMemory(session, client);
+      this.lastArchivedTurns.set(sessionKey, session.turns);
     } catch (e: any) {
       this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
     }
@@ -1769,6 +1812,7 @@ export class Controller {
   }
 
   dispose(): void {
+    this.clearIdleSave();
     this.cancel();
     this.statusBar.dispose();
     this.log.dispose();
