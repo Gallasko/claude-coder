@@ -8,7 +8,9 @@ export interface TurnEvents {
   onText: (delta: string) => void;
   onToolUse: (name: string, input: unknown) => void;
   onToolResult: (name: string, ok: boolean, preview: string) => void;
-  onRequestDone: (usage: Anthropic.Usage) => void;
+  /** model is the model that actually served the request — may differ from
+   *  session.model when Fable's server-side fallback silently serves Opus. */
+  onRequestDone: (usage: Anthropic.Usage, model: string) => void;
   onNotice: (message: string) => void;
   /** Live activity signal: current phase + approximate output tokens this turn. */
   onProgress: (phase: string, approxTokens: number) => void;
@@ -84,7 +86,7 @@ export async function runTurn(
     // Re-sync the approximate counter to reality.
     realOutputTokens += response.usage.output_tokens ?? 0;
     approxChars = 0;
-    events.onRequestDone(response.usage);
+    events.onRequestDone(response.usage, response.model);
 
     // Echo the assistant content back verbatim (thinking blocks included).
     session.messages.push({ role: 'assistant', content: response.content as any });

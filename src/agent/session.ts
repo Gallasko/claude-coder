@@ -36,12 +36,17 @@ export class Session {
   alwaysAllowed: Set<string> = new Set();
   /** TaskMemory record (see taskMemoryStore.ts) this session refreshes as it touches files — unset until the first touched-file update. */
   activeTaskMemoryId: number | undefined;
+  /** Model alias for the subscription backend, tracked per-session so escalation can step sonnet→opus without leaving the plan (falls back to the global config default when unset). */
+  subModel: string | undefined;
 
   constructor(
     public model: string,
     public effort: 'low' | 'medium' | 'high' | 'xhigh' = 'high',
-    public backend: 'subscription' | 'credits' = 'credits'
-  ) {}
+    public backend: 'subscription' | 'credits' = 'credits',
+    subModel?: string
+  ) {
+    this.subModel = subModel;
+  }
 
   get cost(): number {
     return costUsd(this.totals, this.model);
@@ -77,11 +82,12 @@ export class SessionManager {
     model: string,
     effort?: Session['effort'],
     carryOver?: string,
-    backend: Session['backend'] = 'credits'
+    backend: Session['backend'] = 'credits',
+    subModel?: string
   ): Session {
     this.archivedCost += this.current.cost;
     this.archivedRequests += this.current.totals.requests;
-    this.current = new Session(model, effort ?? 'high', backend);
+    this.current = new Session(model, effort ?? 'high', backend, subModel);
     this.current.carryOver = carryOver;
     return this.current;
   }

@@ -112,6 +112,7 @@ export class Controller {
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
     this.sessions.current.backend = this.defaultBackend();
+    this.sessions.current.subModel = this.subscriptionModel();
     this.log = vscode.window.createOutputChannel('Claude Coder');
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     this.statusBar.command = 'claudeCoder.showCosts';
@@ -288,6 +289,7 @@ export class Controller {
     resetCliCache();
     if (!this.busy) {
       this.sessions.current.backend = this.defaultBackend();
+      this.sessions.current.subModel = this.subscriptionModel();
     }
     this.post({ type: 'notice', text: summary });
     this.postSessionInfo();
@@ -624,9 +626,12 @@ export class Controller {
                   `The subscription run failed with: ${result.errorText}\n\nRun the setup to log in to Claude Code again, or switch to API credits.`
                 );
               } else if (client) {
-                void this.offerEscalation(
-                  `The subscription attempt failed (${result.errorText ?? 'unknown'}). Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`
-                );
+                const currentSubModel = session.subModel ?? this.subscriptionModel();
+                const escalateDesc =
+                  currentSubModel !== 'opus'
+                    ? 'Escalating switches to opus on your subscription plan (no credits spent).'
+                    : `Escalating restarts the task on ${displayName(this.ladder()[1] ?? this.ladder()[0])} using API credits.`;
+                void this.offerEscalation(`The subscription attempt failed (${result.errorText ?? 'unknown'}). ${escalateDesc}`);
               }
             }
             return;
@@ -714,9 +719,9 @@ export class Controller {
         onToolUse: (name, input) =>
           this.post({ type: 'toolUse', name, detail: previewInput(name, input) }),
         onToolResult: (name, ok, preview) => this.post({ type: 'toolResult', name, ok, preview }),
-        onRequestDone: (usage) => {
+        onRequestDone: (usage, servedModel) => {
           this.log.appendLine(
-            `[req] session=#${session.id} model=${session.model} ` +
+            `[req] session=#${session.id} model=${servedModel} ` +
               `in=${usage.input_tokens} out=${usage.output_tokens} ` +
               `cacheRead=${usage.cache_read_input_tokens ?? 0} cacheWrite=${usage.cache_creation_input_tokens ?? 0} ` +
               `sessionCost=${formatUsd(session.cost)} total=${formatUsd(this.grandTotal())}`
@@ -724,7 +729,7 @@ export class Controller {
           const totals = emptyTotals();
           addUsage(totals, usage);
           this.recordUsage({
-            model: session.model,
+            model: servedModel,
             backend: 'credits',
             kind: 'turn',
             sessionId: session.id,
@@ -732,7 +737,7 @@ export class Controller {
             outputTokens: totals.outputTokens,
             cacheReadTokens: totals.cacheReadTokens,
             cacheWriteTokens: totals.cacheWriteTokens,
-            costUsd: costUsd(totals, session.model),
+            costUsd: costUsd(totals, servedModel),
           });
           this.chatHistoryStore?.addUsage(session.id, {
             backend: 'credits',
@@ -740,7 +745,7 @@ export class Controller {
             outputTokens: totals.outputTokens,
             cacheReadTokens: totals.cacheReadTokens,
             cacheWriteTokens: totals.cacheWriteTokens,
-            costUsd: costUsd(totals, session.model),
+            costUsd: costUsd(totals, servedModel),
             assistantChars: 0,
           });
           this.updateStatusBar();
@@ -815,7 +820,7 @@ export class Controller {
       prompt,
       workspaceRoot: this.workspaceRoot(),
       toolCtx: this.buildToolContext(session, memory, client),
-      model: this.subscriptionModel(),
+      model: session.subModel ?? this.subscriptionModel(),
       resumeSessionId: session.sdkSessionId,
       minimizeOutput: minimize,
       maxTurns: 100,
@@ -844,7 +849,7 @@ export class Controller {
     this.subTotals.requests += 1;
     this.subValueUsd += result.estValueUsd;
     this.recordUsage({
-      model: this.subscriptionModel(),
+      model: session.subModel ?? this.subscriptionModel(),
       backend: 'subscription',
       kind: 'subscription',
       sessionId: session.id,
@@ -919,7 +924,8 @@ export class Controller {
           this.ladder()[0],
           EFFORT_BY_COMPLEXITY[c.complexity],
           undefined,
-          backend
+          backend,
+          this.subscriptionModel()
         );
         fresh.taskSummary = c.summary;
         // Post the switch the instant the model changes — planning (Opus/Fable)
@@ -1069,7 +1075,7 @@ export class Controller {
   newTask(): void {
     this.cancel();
     void this.archiveChat(this.sessions.current);
-    this.sessions.reset(this.ladder()[0], undefined, undefined, this.defaultBackend());
+    this.sessions.reset(this.ladder()[0], undefined, undefined, this.defaultBackend(), this.subscriptionModel());
     this.post({ type: 'taskSwitch', text: 'New session started.' });
     this.postSessionInfo();
     this.updateStatusBar();
@@ -1077,45 +1083,56 @@ export class Controller {
 
   async escalate(): Promise<void> {
     const ladder = this.ladder();
+    const wasSubscription = this.sessions.current.backend === 'subscription';
+    const currentSubModel = this.sessions.current.subModel ?? this.subscriptionModel();
+    // A subscription task that hasn't hit opus yet escalates within the plan
+    // first (no credits spent) — only fall to the credits ladder once the
+    // plan's top model has already been tried.
+    const escalateWithinPlan = wasSubscription && currentSubModel !== 'opus';
     let next: string | undefined;
-    if (this.sessions.current.backend === 'subscription') {
-      // The subscription runs on the ladder's base tier — escalating means
-      // moving to the next credits tier (or the base tier on credits if the
-      // ladder has a single entry).
-      next = ladder[1] ?? ladder[0];
-    } else {
-      const idx = ladder.indexOf(this.sessions.current.model);
-      next = ladder[idx + 1];
-    }
-    if (!next) {
-      this.post({
-        type: 'notice',
-        text: `Already on the top model of the ladder (${displayName(this.sessions.current.model)}).`,
-      });
-      this.post({ type: 'turnDone', stopReason: 'noop' });
-      return;
-    }
-    if (next === 'claude-fable-5') {
-      const ok = await this.requestPermission({
-        kind: 'command',
-        key: `escalate:never-stored:${++this.permissionId}`,
-        title: 'Escalate to Fable 5?',
-        detail: 'Fable costs 2x Opus ($10 in / $50 out per MTok).',
-      });
-      if (!ok) {
+    if (!escalateWithinPlan) {
+      if (wasSubscription) {
+        next = ladder[1] ?? ladder[0];
+      } else {
+        const idx = ladder.indexOf(this.sessions.current.model);
+        next = ladder[idx + 1];
+      }
+      if (!next) {
+        this.post({
+          type: 'notice',
+          text: `Already on the top model of the ladder (${displayName(this.sessions.current.model)}).`,
+        });
         this.post({ type: 'turnDone', stopReason: 'noop' });
         return;
+      }
+      if (next === 'claude-fable-5') {
+        const ok = await this.requestPermission({
+          kind: 'command',
+          key: `escalate:never-stored:${++this.permissionId}`,
+          title: 'Escalate to Fable 5?',
+          detail: 'Fable costs 2x Opus ($10 in / $50 out per MTok).',
+        });
+        if (!ok) {
+          this.post({ type: 'turnDone', stopReason: 'noop' });
+          return;
+        }
       }
     }
     this.cancel();
     const carryOver = this.sessions.buildEscalationCarryOver();
     const summary = this.sessions.current.taskSummary;
-    const fresh = this.sessions.reset(next, 'xhigh', carryOver, 'credits');
+    let fresh: Session;
+    let noticeText: string;
+    if (escalateWithinPlan) {
+      fresh = this.sessions.reset(ladder[0], 'xhigh', carryOver, 'subscription', 'opus');
+      noticeText =
+        'Escalated to opus on your subscription plan (no credits spent). The task restarts fresh with a summary of the previous attempt.';
+    } else {
+      fresh = this.sessions.reset(next!, 'xhigh', carryOver, 'credits');
+      noticeText = `Escalated to ${displayName(next!)} on API credits (effort xhigh). The task restarts fresh with a summary of the previous attempt.`;
+    }
     fresh.taskSummary = summary;
-    this.post({
-      type: 'taskSwitch',
-      text: `Escalated to ${displayName(next)} on API credits (effort xhigh). The task restarts fresh with a summary of the previous attempt.`,
-    });
+    this.post({ type: 'taskSwitch', text: noticeText });
     this.postSessionInfo();
     this.updateStatusBar();
     await this.handleUserMessage(
@@ -1658,7 +1675,7 @@ export class Controller {
       projectPath: root ?? 'unknown',
       projectName: root ? path.basename(root) : 'unknown',
       title: (session.taskSummary || promptText).slice(0, 80),
-      model: session.backend === 'subscription' ? this.subscriptionModel() : session.model,
+      model: session.backend === 'subscription' ? session.subModel ?? this.subscriptionModel() : session.model,
       backend: session.backend,
       createdAt: Date.now(),
     });
@@ -1800,7 +1817,7 @@ export class Controller {
 
   private backendLabel(s: Session): string {
     return s.backend === 'subscription'
-      ? `${this.subscriptionModel()} on your plan`
+      ? `${s.subModel ?? this.subscriptionModel()} on your plan`
       : `${displayName(s.model)} on credits`;
   }
 
@@ -1824,7 +1841,7 @@ export class Controller {
   private updateStatusBar(): void {
     const s = this.sessions.current;
     const spin = this.busy ? '$(sync~spin) ' : '$(sparkle) ';
-    const label = s.backend === 'subscription' ? `${this.subscriptionModel()} (plan)` : displayName(s.model);
+    const label = s.backend === 'subscription' ? `${s.subModel ?? this.subscriptionModel()} (plan)` : displayName(s.model);
     this.statusBar.text = `${spin}${label} · ${formatUsd(this.grandTotal())}`;
     this.statusBar.tooltip =
       `Claude Coder — credits: session ${formatUsd(s.cost)}, total ${formatUsd(this.grandTotal())}. ` +
