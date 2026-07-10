@@ -8,6 +8,7 @@ import { executeTool } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
 import { supportsAdaptiveThinking, CLASSIFIER_MODEL } from './models';
+import { PLAN_SYSTEM } from './planner';
 
 /**
  * Exposes the same tool set the credits backend uses (see tools.ts:
@@ -384,6 +385,122 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
   }
 
   return { finalText, sdkSessionId, estValueUsd, usage, isError, errorText, numTurns };
+}
+
+/** Read-only workspace-fs tools the subscription planner may call — mirrors planner.ts's READ_ONLY_TOOLS. */
+const READ_ONLY_MCP_TOOLS = new Set([
+  'mcp__workspace-fs__read_file',
+  'mcp__workspace-fs__glob',
+  'mcp__workspace-fs__grep',
+  'mcp__workspace-fs__get_diagnostics',
+]);
+
+export interface SubscriptionPlanParams {
+  prompt: string;
+  workspaceRoot: string;
+  /** Backs the workspace-fs MCP server; write-shaped tools are denied by canUseTool below, not omitted from the server. */
+  toolCtx: ToolContext;
+  /** 'sonnet' | 'opus' | 'haiku' — the subscription CLI's model aliases, not API model ids. */
+  model: string;
+  maxToolCalls: number;
+  abort: AbortController;
+  onToolUse?: (name: string, detail: string) => void;
+}
+
+export interface SubscriptionPlanResult {
+  plan: string;
+  usage: SubUsage;
+  /** Estimated API-equivalent value of the plan run (informational — not billed). */
+  estValueUsd: number;
+  toolCalls: number;
+  /** True if the run hit its turn budget without ever producing a plan. */
+  truncated: boolean;
+  isError: boolean;
+  errorText: string | undefined;
+}
+
+/**
+ * Subscription-backed counterpart to planner.ts's planTask: runs the same
+ * read-only exploration + plan-drafting job through the Agent SDK so it
+ * draws from the user's Pro/Max plan instead of API credits. Reuses
+ * buildWorkspaceFsServer for the exploration tools but restricts canUseTool
+ * to the read-only subset — the planner must never write files.
+ */
+export async function runSubscriptionPlan(p: SubscriptionPlanParams): Promise<SubscriptionPlanResult> {
+  const env = buildSubscriptionEnv();
+  const claudeExecutable = await findClaudeExecutable();
+
+  const canUseTool: CanUseTool = async (toolName, input): Promise<PermissionResult> => {
+    if (READ_ONLY_MCP_TOOLS.has(toolName)) {
+      return { behavior: 'allow', updatedInput: input };
+    }
+    return { behavior: 'deny', message: 'Planning is read-only — this tool is unavailable during planning.' };
+  };
+
+  const options: Options = {
+    cwd: p.workspaceRoot,
+    model: p.model,
+    pathToClaudeCodeExecutable: claudeExecutable,
+    maxTurns: p.maxToolCalls + 1,
+    abortController: p.abort,
+    canUseTool,
+    env,
+    settingSources: [],
+    mcpServers: { 'workspace-fs': buildWorkspaceFsServer(p.toolCtx) },
+    disallowedTools: ['Read', 'Write', 'Edit', 'MultiEdit', 'Grep', 'Glob', 'Bash'],
+    systemPrompt: PLAN_SYSTEM,
+  };
+
+  let plan = '';
+  let toolCalls = 0;
+  let estValueUsd = 0;
+  let isError = false;
+  let errorText: string | undefined;
+  let hitMaxTurns = false;
+  const usage: SubUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  for await (const message of query({ prompt: p.prompt, options }) as AsyncIterable<SDKMessage>) {
+    switch (message.type) {
+      case 'assistant': {
+        for (const block of message.message.content) {
+          if (block.type === 'tool_use') {
+            toolCalls += 1;
+            p.onToolUse?.(block.name, previewToolInput(block.input));
+          } else if (block.type === 'text' && message.parent_tool_use_id == null) {
+            plan = block.text;
+          }
+        }
+        break;
+      }
+
+      case 'result': {
+        estValueUsd = message.total_cost_usd ?? 0;
+        const u: any = (message as any).usage;
+        if (u) {
+          usage.inputTokens = u.input_tokens ?? 0;
+          usage.outputTokens = u.output_tokens ?? 0;
+          usage.cacheReadTokens = u.cache_read_input_tokens ?? 0;
+          usage.cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
+        }
+        if (message.subtype !== 'success') {
+          isError = true;
+          errorText = message.subtype;
+          hitMaxTurns = message.subtype === 'error_max_turns';
+        } else if (message.is_error) {
+          isError = true;
+          errorText = message.result;
+        } else if (message.result && !plan) {
+          plan = message.result;
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  return { plan: plan.trim(), usage, estValueUsd, toolCalls, truncated: hitMaxTurns && !plan.trim(), isError, errorText };
 }
 
 const UTILITY_SYSTEM_PROMPT =

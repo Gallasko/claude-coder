@@ -9,6 +9,10 @@ export interface FileRecord {
   mtimeMs?: number;
   summary?: string;
   summarizedAt?: number;
+  /** How many times this file has been read (raw reads and served-from-cache reads both count) — drives detailed-summary upgrades. */
+  readCount?: number;
+  /** Whether the cached summary is the quick digest or the fuller digest generated for frequently-read files. */
+  summaryDetail?: 'concise' | 'detailed';
 }
 
 export interface FileSummaryEntry extends FileRecord {
@@ -86,10 +90,29 @@ export class MemoryStore {
     }
   }
 
-  noteRead(filePath: string, hash: string): void {
-    this.data.files[filePath] = { hash, lastReadAt: Date.now() };
+  /** Records a real (non-cached) read; preserves the existing summary/readCount. Returns the updated read count. */
+  noteRead(filePath: string, hash: string): number {
+    const existing = this.data.files[filePath];
+    const readCount = (existing?.readCount ?? 0) + 1;
+    this.data.files[filePath] = { ...existing, hash, lastReadAt: Date.now(), readCount };
     this.dirty = true;
     void this.save();
+    return readCount;
+  }
+
+  /** Bumps the read count for a file served from the summary cache (no real read happened). Returns the updated read count. */
+  bumpReadCount(filePath: string): number {
+    const existing = this.data.files[filePath];
+    const readCount = (existing?.readCount ?? 0) + 1;
+    this.data.files[filePath] = {
+      ...existing,
+      hash: existing?.hash ?? '',
+      lastReadAt: existing?.lastReadAt ?? Date.now(),
+      readCount,
+    };
+    this.dirty = true;
+    void this.save();
+    return readCount;
   }
 
   getFileRecord(filePath: string): FileRecord | undefined {
@@ -103,14 +126,16 @@ export class MemoryStore {
   }
 
   /** Persists a lazily-generated file summary, keyed to the size+mtime it was generated against. */
-  saveSummary(filePath: string, mtimeMs: number, size: number, summary: string): void {
+  saveSummary(filePath: string, mtimeMs: number, size: number, summary: string, detail: 'concise' | 'detailed' = 'concise'): void {
     const existing = this.data.files[filePath];
     this.data.files[filePath] = {
       hash: existing?.hash ?? '',
       lastReadAt: existing?.lastReadAt ?? Date.now(),
+      readCount: existing?.readCount,
       size,
       mtimeMs,
       summary,
+      summaryDetail: detail,
       summarizedAt: Date.now(),
     };
     this.dirty = true;

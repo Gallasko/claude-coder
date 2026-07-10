@@ -171,6 +171,21 @@ const FILE_SUMMARY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+const FILE_SUMMARY_DETAILED_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: {
+      type: 'string',
+      description:
+        'Detailed digest for a coding agent that reads this file often: purpose, exported/public API, per-function ' +
+        'or per-class behavior (params, returns, side effects), key invariants or gotchas, notable dependencies, and ' +
+        'any TODOs. Go deeper than a quick digest — this file is read frequently, so the extra detail pays for itself.',
+    },
+  },
+  required: ['summary'],
+  additionalProperties: false,
+} as const;
+
 /**
  * Cheap Haiku call (subscription-first, credits fallback) that turns a
  * file's content into a short digest — stored in MemoryStore (see memory.ts)
@@ -181,7 +196,8 @@ export async function summarizeFile(
   client: Anthropic | undefined,
   workspaceRoot: string | undefined,
   filePath: string,
-  content: string
+  content: string,
+  detailed = false
 ): Promise<SummaryTaskResult<string> | undefined> {
   const trimmed = content.slice(0, 20_000);
   if (!trimmed.trim()) {
@@ -190,9 +206,14 @@ export async function summarizeFile(
   const result = await runHaikuTask({
     client,
     workspaceRoot,
-    schema: FILE_SUMMARY_SCHEMA,
-    maxTokens: 400,
-    prompt: [`Summarize this file for a coding agent's lazy read cache: ${filePath}`, `"""${trimmed}"""`].join('\n\n'),
+    schema: detailed ? FILE_SUMMARY_DETAILED_SCHEMA : FILE_SUMMARY_SCHEMA,
+    maxTokens: detailed ? 900 : 400,
+    prompt: [
+      detailed
+        ? `Write a detailed digest of this frequently-read file for a coding agent's lazy read cache: ${filePath}`
+        : `Summarize this file for a coding agent's lazy read cache: ${filePath}`,
+      `"""${trimmed}"""`,
+    ].join('\n\n'),
   });
   const parsed = (result.structured ?? JSON.parse(result.text)) as { summary: string };
   return { ...result, data: parsed.summary };

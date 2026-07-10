@@ -18,6 +18,8 @@ export interface MemoryFileSummaryView {
   summary: string;
   status: string;
   summarizedAt: number;
+  detail: 'concise' | 'detailed';
+  readCount: number;
 }
 
 export interface TaskMemoryView {
@@ -116,7 +118,9 @@ export class MemoryPanel {
     const summaryLines = fileSummaries
       .map(
         (s) =>
-          `<li><span class="tag tag-${esc(s.status)}">${esc(s.status)}</span> ${esc(s.path)} — ${esc(s.summary)} <button class="reload" data-path="${esc(s.path)}">Reload</button></li>`
+          `<li><span class="tag tag-${esc(s.status)}">${esc(s.status)}</span>${
+            s.detail === 'detailed' ? '<span class="tag tag-detail">detailed</span>' : ''
+          } ${esc(s.path)} — ${esc(s.summary)} <span class="meta">(read ${s.readCount}×)</span> <button class="reload" data-path="${esc(s.path)}">Reload</button></li>`
       )
       .join('');
 
@@ -142,6 +146,7 @@ export class MemoryPanel {
     .tag-fresh { background: var(--vscode-testing-iconPassed, #2a8); color: #fff; }
     .tag-stale { background: var(--vscode-testing-iconQueued, #c90); color: #fff; }
     .tag-unknown { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+    .tag-detail { background: var(--vscode-charts-purple, #8957e5); color: #fff; }
     .memory-card { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border); border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; }
     .memory-card-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
     .memory-card-header h3 { margin: 0; font-size: 13px; }

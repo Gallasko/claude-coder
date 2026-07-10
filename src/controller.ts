@@ -14,7 +14,7 @@ import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
 import { MemoryStore } from './agent/memory';
-import { runSubscriptionTurn, SubscriptionTurnResult, HaikuTaskResult } from './agent/sdkBackend';
+import { runSubscriptionTurn, runSubscriptionPlan, SubscriptionTurnResult, HaikuTaskResult } from './agent/sdkBackend';
 import { resetCliCache } from './agent/cliLocator';
 import {
   creditsReady,
@@ -260,6 +260,20 @@ export class Controller {
 
   private subscriptionModel(): string {
     return this.config().get<string>('subscriptionModel') ?? 'sonnet';
+  }
+
+  /** Maps a planning-ladder API model id to the subscription CLI's model alias, or undefined if the CLI has no equivalent (e.g. Fable). */
+  private subscriptionModelAlias(apiModel: string): string | undefined {
+    if (apiModel.startsWith('claude-opus-4')) {
+      return 'opus';
+    }
+    if (apiModel.startsWith('claude-sonnet')) {
+      return 'sonnet';
+    }
+    if (apiModel.startsWith('claude-haiku')) {
+      return 'haiku';
+    }
+    return undefined;
   }
 
   private defaultBackend(): Session['backend'] {
@@ -1008,41 +1022,90 @@ export class Controller {
       ]
         .filter(Boolean)
         .join('\n\n');
-      const { plan, usage, toolCalls, truncated } = await planTask(
-        client,
-        model,
-        session.taskSummary,
-        text,
-        this.planningMaxTokens(),
-        {
+      // Plan on the same backend the turn will run on: subscription sessions
+      // draft the plan through the Agent SDK (billed to the Pro/Max plan, no
+      // credits spent) before ever falling back to the credits reasoning tier.
+      let plan = '';
+      let toolCalls = 0;
+      let truncated = false;
+      let noticeText = '';
+
+      const subAlias = this.subscriptionModelAlias(model);
+      if (session.backend === 'subscription' && subAlias && plannerCtx && this.tryWorkspaceRoot()) {
+        const subResult = await runSubscriptionPlan({
+          prompt: [
+            plannerContext,
+            session.taskSummary ? `Task: ${session.taskSummary}` : '',
+            `Request:\n"""${text.slice(0, 4000)}"""`,
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+          workspaceRoot: this.workspaceRoot(),
+          toolCtx: plannerCtx,
+          model: subAlias,
+          maxToolCalls: this.planningMaxToolCalls(),
+          abort: this.abort!,
+          onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+        });
+        if (!subResult.isError && subResult.plan) {
+          plan = subResult.plan;
+          toolCalls = subResult.toolCalls;
+          truncated = subResult.truncated;
+          this.subTotals.inputTokens += subResult.usage.inputTokens;
+          this.subTotals.outputTokens += subResult.usage.outputTokens;
+          this.subTotals.cacheReadTokens += subResult.usage.cacheReadTokens;
+          this.subTotals.cacheWriteTokens += subResult.usage.cacheWriteTokens;
+          this.subTotals.requests += 1;
+          this.subValueUsd += subResult.estValueUsd;
+          this.recordUsage({
+            model: subAlias,
+            backend: 'subscription',
+            kind: 'plan',
+            sessionId: session.id,
+            inputTokens: subResult.usage.inputTokens,
+            outputTokens: subResult.usage.outputTokens,
+            cacheReadTokens: subResult.usage.cacheReadTokens,
+            cacheWriteTokens: subResult.usage.cacheWriteTokens,
+            costUsd: subResult.estValueUsd,
+          });
+          noticeText = `Plan drafted by ${displayName(model)} on your subscription (no credits)${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (plan value ~${formatUsd(subResult.estValueUsd)}):\n${summarizePlan(plan)}`;
+        } else {
+          this.log.appendLine(`[sub planner fallback] ${subResult.errorText ?? 'no plan produced'}`);
+        }
+      }
+
+      if (!plan) {
+        const creditsResult = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens(), {
           toolCtx: plannerCtx,
           maxToolCalls: this.planningMaxToolCalls(),
           context: plannerContext,
           signal: this.abort?.signal,
           onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
-        }
-      );
-      const totals = emptyTotals();
-      addUsage(totals, usage);
-      this.plannerCost += costUsd(totals, model);
-      this.plannerRequests += 1;
-      this.recordUsage({
-        model,
-        backend: 'credits',
-        kind: 'plan',
-        sessionId: session.id,
-        inputTokens: totals.inputTokens,
-        outputTokens: totals.outputTokens,
-        cacheReadTokens: totals.cacheReadTokens,
-        cacheWriteTokens: totals.cacheWriteTokens,
-        costUsd: costUsd(totals, model),
-      });
+        });
+        const totals = emptyTotals();
+        addUsage(totals, creditsResult.usage);
+        this.plannerCost += costUsd(totals, model);
+        this.plannerRequests += 1;
+        this.recordUsage({
+          model,
+          backend: 'credits',
+          kind: 'plan',
+          sessionId: session.id,
+          inputTokens: totals.inputTokens,
+          outputTokens: totals.outputTokens,
+          cacheReadTokens: totals.cacheReadTokens,
+          cacheWriteTokens: totals.cacheWriteTokens,
+          costUsd: costUsd(totals, model),
+        });
+        plan = creditsResult.plan;
+        toolCalls = creditsResult.toolCalls;
+        truncated = creditsResult.truncated;
+        noticeText = `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`;
+      }
+
       if (plan) {
         session.plan = plan;
-        this.post({
-          type: 'notice',
-          text: `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
-        });
+        this.post({ type: 'notice', text: noticeText });
         if (truncated) {
           this.post({
             type: 'notice',
@@ -1176,10 +1239,20 @@ export class Controller {
             return undefined;
           }
           const firstLine = s.summary?.split('\n').find((l) => l.trim()) ?? '';
-          return { path: s.path, summary: firstLine, status, summarizedAt: s.summarizedAt ?? 0 };
+          return {
+            path: s.path,
+            summary: firstLine,
+            status,
+            summarizedAt: s.summarizedAt ?? 0,
+            detail: s.summaryDetail ?? 'concise',
+            readCount: s.readCount ?? 0,
+          };
         })
       )
-    ).filter((s): s is { path: string; summary: string; status: string; summarizedAt: number } => !!s);
+    ).filter(
+      (s): s is { path: string; summary: string; status: string; summarizedAt: number; detail: 'concise' | 'detailed'; readCount: number } =>
+        !!s
+    );
 
     const taskMemories = root
       ? taskMemoryStore.forProject(root, 50).map((m) => ({
@@ -1559,7 +1632,7 @@ export class Controller {
       readCache: session.readCache,
       // Tries the subscription's Haiku before falling back to credits (see
       // summarizeFileForMemory) — available even for subscription-only users.
-      summarizeFile: (path, content) => this.summarizeFileForMemory(client, path, content),
+      summarizeFile: (path, content, detailed) => this.summarizeFileForMemory(client, path, content, detailed),
     };
   }
 
@@ -1614,9 +1687,9 @@ export class Controller {
    * tools.ts readFileTool / memory.ts MemoryStore.saveSummary). Never throws
    * — a missed summary just means the next read falls back to raw content.
    */
-  private async summarizeFileForMemory(client: Anthropic | undefined, filePath: string, content: string): Promise<string | undefined> {
+  private async summarizeFileForMemory(client: Anthropic | undefined, filePath: string, content: string, detailed = false): Promise<string | undefined> {
     try {
-      const result = await summarizeFile(client, this.tryWorkspaceRoot(), filePath, content);
+      const result = await summarizeFile(client, this.tryWorkspaceRoot(), filePath, content, detailed);
       if (!result) {
         return undefined;
       }

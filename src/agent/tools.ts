@@ -12,6 +12,8 @@ const MAX_GREP_MATCHES = 150;
 const MAX_GREP_FILES = 3000;
 const MAX_RESULT_CHARS = 40_000;
 const COMMAND_TIMEOUT_MS = 120_000;
+/** Read count at which a file's cached summary is upgraded from a quick digest to a fuller, detailed one. */
+const DETAILED_SUMMARY_THRESHOLD = 3;
 
 /**
  * Tool definitions. This array must stay STABLE and in a fixed order — tools
@@ -164,8 +166,8 @@ export interface ToolContext {
   taskSummary: string;
   /** Whole-file hashes already sent in this session's transcript (in-memory, per Session). */
   readCache: Map<string, string>;
-  /** Best-effort file summarizer for the lazy read cache (see summarizer.ts summarizeFile). Absent when no API client is configured. */
-  summarizeFile?: (path: string, content: string) => Promise<string | undefined>;
+  /** Best-effort file summarizer for the lazy read cache (see summarizer.ts summarizeFile). Absent when no API client is configured. `detailed` requests the fuller digest for frequently-read files. */
+  summarizeFile?: (path: string, content: string, detailed?: boolean) => Promise<string | undefined>;
   /**
    * Task-focused condenser for planner reads (see summarizer.ts
    * preprocessFileForPlanning) — strips content irrelevant to the current
@@ -224,6 +226,22 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
       const stat = await fs.stat(abs);
       const cached = ctx.memory.freshSummary(display, stat.mtimeMs, stat.size);
       if (cached) {
+        const readCount = ctx.memory.bumpReadCount(display);
+        const record = ctx.memory.getFileRecord(display);
+        // Cache hits skip the raw read that normally feeds the summarizer below — once
+        // a file is hot enough to warrant the detailed digest, read it once in the
+        // background to upgrade the cached summary in place.
+        if (ctx.summarizeFile && readCount >= DETAILED_SUMMARY_THRESHOLD && record?.summaryDetail !== 'detailed') {
+          fs.readFile(abs, 'utf8')
+            .then((raw) =>
+              ctx.summarizeFile!(display, raw, true).then((summary) => {
+                if (summary) {
+                  ctx.memory.saveSummary(display, stat.mtimeMs, stat.size, summary, 'detailed');
+                }
+              })
+            )
+            .catch(() => undefined);
+        }
         return (
           `${display}: cached summary (unchanged since last summarized) — pass full:true to read the exact ` +
           `file content (required before editing).\n\n${cached}`
@@ -236,7 +254,7 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
 
   const raw = await fs.readFile(abs, 'utf8');
   const hash = fileHash(raw);
-  ctx.memory.noteRead(display, hash);
+  const readCount = ctx.memory.noteRead(display, hash);
 
   // Whole-file reads already sent verbatim earlier in this session don't
   // need to be resent — the model still has them in its own transcript.
@@ -275,13 +293,14 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
   const result = truncate(numbered + footer);
   if (wholeFile) {
     ctx.readCache.set(display, hash);
+    const detailed = readCount >= DETAILED_SUMMARY_THRESHOLD;
     // Best-effort, never blocks this read: refresh the summary cache for
     // next time, keyed to the size+mtime just read.
     if (ctx.summarizeFile && !raw.includes('\u0000') && raw.length > 2000) {
       fs.stat(abs)
-        .then((stat) => ctx.summarizeFile!(display, raw).then((summary) => {
+        .then((stat) => ctx.summarizeFile!(display, raw, detailed).then((summary) => {
           if (summary) {
-            ctx.memory.saveSummary(display, stat.mtimeMs, stat.size, summary);
+            ctx.memory.saveSummary(display, stat.mtimeMs, stat.size, summary, detailed ? 'detailed' : 'concise');
           }
         }))
         .catch(() => undefined);

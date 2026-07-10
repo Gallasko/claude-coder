@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { TOOL_DEFINITIONS, ToolContext, executeTool } from './tools';
 
-const PLAN_SYSTEM =
+export const PLAN_SYSTEM =
   'You are the planning stage of a coding agent. You have read-only tools (grep, glob, read_file) — use them ' +
   'FIRST to ground the plan in the actual codebase: locate the files involved, read the parts you would touch, ' +
   'and verify real paths, names and signatures. Keep exploration tight — a handful of targeted lookups, not an ' +
