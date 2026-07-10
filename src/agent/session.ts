@@ -34,6 +34,8 @@ export class Session {
   promptCount = 0;
   /** "Always allow" permission grants — scoped to this chat only; a new session starts with none. */
   alwaysAllowed: Set<string> = new Set();
+  /** TaskMemory record (see taskMemoryStore.ts) this session refreshes as it touches files — unset until the first touched-file update. */
+  activeTaskMemoryId: number | undefined;
 
   constructor(
     public model: string,

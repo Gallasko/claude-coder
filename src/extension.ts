@@ -30,6 +30,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCoder.showChatHistory', () => controller.showChatHistory()),
     vscode.commands.registerCommand('claudeCoder.resetPermissions', () => controller.resetPermissions())
   );
+
+  // Background freshness check for task memories (see taskMemoryStore.ts) —
+  // catches files edited outside the extension (by the user directly) so
+  // stale memories get flagged instead of silently going out of sync.
+  const taskMemoryPoll = setInterval(() => void controller.pollTaskMemoryFreshness(), 5 * 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(taskMemoryPoll) });
 }
 
 export function deactivate(): void {}

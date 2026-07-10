@@ -29,7 +29,15 @@ import { ChatHistoryStore } from './agent/chatHistoryStore';
 import { ProjectStore } from './agent/projectStore';
 import { SummaryStore, SummaryRecord } from './agent/summaryStore';
 import { MessageStore } from './agent/messageStore';
-import { summarizeSession, findRelevantChats, summarizeCommitMessage, summarizeFile } from './agent/summarizer';
+import { TaskMemory, TaskMemoryFile, TaskMemoryStore } from './agent/taskMemoryStore';
+import {
+  summarizeSession,
+  findRelevantChats,
+  summarizeCommitMessage,
+  summarizeFile,
+  createTaskMemory,
+  findRelevantMemories,
+} from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
 import {
   CLASSIFIER_MODEL,
@@ -90,6 +98,8 @@ export class Controller {
   /** Persistent, cross-workspace raw transcript (every user/assistant turn) — see messageStore.ts. */
   private messageStore: MessageStore | undefined;
   private readonly messageStoreReady: Promise<MessageStore>;
+  /** Persistent, per-workspace task-level memories (summary + touched files) — see taskMemoryStore.ts. */
+  private taskMemory: TaskMemoryStore | undefined;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -558,7 +568,8 @@ export class Controller {
       let content = text;
       if (isFirst) {
         const pastSummaries = await this.findRelevantPastSummaries(client, text);
-        content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan, pastSummaries) + text;
+        const taskMemories = await this.findRelevantTaskMemories(client, text);
+        content = this.buildFirstMessagePreamble(session.carryOver, memory, session.plan, pastSummaries, taskMemories) + text;
       }
 
       const minimize = this.minimizeOutputTokens();
@@ -585,6 +596,7 @@ export class Controller {
           } else {
             this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
             this.postSessionInfo();
+            void this.maybeUpdateTaskMemory(session, client);
             if (result.isError) {
               this.post({
                 type: 'notice',
@@ -638,6 +650,7 @@ export class Controller {
               const result = await this.runSubscription(session, content, minimize, memory, client);
               this.post({ type: 'turnDone', stopReason: result.isError ? 'error' : 'end_turn' });
               this.postSessionInfo();
+              void this.maybeUpdateTaskMemory(session, client);
               if (result.isError) {
                 this.post({
                   type: 'notice',
@@ -743,6 +756,7 @@ export class Controller {
       }
       this.post({ type: 'turnDone', stopReason: result.stopReason });
       this.postSessionInfo();
+      void this.maybeUpdateTaskMemory(session, client);
       if (this.autoCompact()) {
         await this.compactIfNeeded(client, session);
       } else {
@@ -1234,7 +1248,8 @@ export class Controller {
     carryOver: string | undefined,
     memory: MemoryStore,
     plan: string | undefined,
-    pastSummaries: SummaryRecord[]
+    pastSummaries: SummaryRecord[],
+    taskMemories: TaskMemory[]
   ): string {
     const root = this.workspaceRoot();
     const openFiles = vscode.window.tabGroups.all
@@ -1253,12 +1268,22 @@ export class Controller {
           )
           .join('\n')}`
       : '';
+    const taskMemoryText = taskMemories.length
+      ? taskMemories
+          .map((m) => {
+            const files = Object.keys(m.files);
+            const staleNote = m.staleFiles?.length ? ` [stale: ${m.staleFiles.join(', ')} changed since — verify before relying on it]` : '';
+            return `- ${m.title}: ${m.summary}${files.length ? ` (files: ${files.join(', ')})` : ''}${staleNote}`;
+          })
+          .join('\n')
+      : '';
     const parts = [
       `<context>`,
       `Workspace root: ${root}`,
       openFiles.length ? `Open editor tabs: ${openFiles.join(', ')}` : '',
       `</context>`,
       chatHistory ? `<chat-history>\n${chatHistory}\n</chat-history>` : '',
+      taskMemoryText ? `<task-memory>\n${taskMemoryText}\n</task-memory>` : '',
       digest ? `<memory>\n${digest}\n</memory>` : '',
       plan ? `<plan>\n${plan}\n</plan>\nImplement the plan above. Don't re-derive it — follow it.` : '',
       carryOver ? `<summary-so-far>\n${carryOver}\n</summary-so-far>` : '',
@@ -1274,6 +1299,163 @@ export class Controller {
       this.memory = await MemoryStore.load(path.join(dir, 'memory.json'));
     }
     return this.memory;
+  }
+
+  /** Lazily opens (or creates) the per-workspace task-memory file — see taskMemoryStore.ts. */
+  private async ensureTaskMemory(): Promise<TaskMemoryStore> {
+    if (!this.taskMemory) {
+      const dir = this.context.storageUri?.fsPath ?? path.join(this.workspaceRoot(), '.claudeCoder');
+      this.taskMemory = await TaskMemoryStore.load(path.join(dir, 'task-memories.json'));
+    }
+    return this.taskMemory;
+  }
+
+  private async statTaskMemoryFiles(root: string, paths: string[]): Promise<Record<string, TaskMemoryFile>> {
+    const entries = await Promise.all(
+      paths.map(async (p): Promise<[string, TaskMemoryFile] | undefined> => {
+        try {
+          const st = await fs.stat(path.join(root, p));
+          return [p, { mtimeMs: st.mtimeMs, size: st.size }];
+        } catch {
+          return undefined; // deleted or unreadable — drop from tracking
+        }
+      })
+    );
+    return Object.fromEntries(entries.filter((e): e is [string, TaskMemoryFile] => !!e));
+  }
+
+  /**
+   * Best-effort: create or refresh this task's memory from the files it has
+   * touched so far (see MemoryStore.recentChanges) plus a cheap Haiku summary
+   * of the transcript. Called mid-task every ~5 prompts (maybeUpdateTaskMemory)
+   * and once more at task end (archiveChat) so the memory stays in sync with
+   * what actually happened, without waiting for the task to finish.
+   */
+  private async upsertTaskMemory(session: Session, client: Anthropic | undefined): Promise<void> {
+    const root = this.tryWorkspaceRoot();
+    if (!root || session.turns === 0) {
+      return;
+    }
+    try {
+      const memory = await this.ensureMemory();
+      const store = await this.ensureTaskMemory();
+      const taskId = String(session.id);
+      const touched = [...new Set(memory.recentChanges(50).filter((c) => c.taskId === taskId).map((c) => c.path))];
+      if (touched.length === 0) {
+        return;
+      }
+      const existing = session.activeTaskMemoryId ? store.get(session.activeTaskMemoryId) : undefined;
+      const files = await this.statTaskMemoryFiles(root, touched);
+      const result = await createTaskMemory(client, root, session, touched, existing?.summary);
+      this.recordHaikuUsage('summarize', session.id, result);
+      const summary = [result.data.summary, ...result.data.keyPoints.map((k) => `- ${k}`)].join('\n');
+      if (existing) {
+        store.update(existing.id, {
+          title: session.taskSummary || existing.title,
+          summary,
+          files: { ...existing.files, ...files },
+          chatIds: [...new Set([...existing.chatIds, session.id])],
+          staleFiles: [],
+        });
+      } else {
+        const created = store.add({
+          projectPath: root,
+          title: session.taskSummary || '(untitled task)',
+          summary,
+          files,
+          chatIds: [session.id],
+        });
+        session.activeTaskMemoryId = created.id;
+      }
+    } catch (e: any) {
+      this.log.appendLine(`[task-memory error] ${e?.message ?? e}`);
+    }
+  }
+
+  /** Refreshes this task's memory every ~5 prompts, so long tasks don't wait until archiveChat to record what was touched. */
+  private async maybeUpdateTaskMemory(session: Session, client: Anthropic | undefined): Promise<void> {
+    if (session.turns === 0 || session.promptCount % 5 !== 0) {
+      return;
+    }
+    await this.upsertTaskMemory(session, client);
+  }
+
+  /**
+   * Best-effort: ask Haiku which task memories in this project (if any) are
+   * relevant to the upcoming task, so a new task can fast-forward on files it
+   * has already touched instead of rediscovering them. Falls back to recency
+   * on error.
+   */
+  private async findRelevantTaskMemories(client: Anthropic | undefined, upcomingTask: string): Promise<TaskMemory[]> {
+    const root = this.tryWorkspaceRoot();
+    if (!root) {
+      return [];
+    }
+    const store = await this.ensureTaskMemory();
+    const candidates = store.forProject(root, 20);
+    if (candidates.length === 0) {
+      return [];
+    }
+    try {
+      const result = await findRelevantMemories(
+        client,
+        root,
+        upcomingTask,
+        candidates.map((m) => ({ id: m.id, title: m.title, summary: m.summary }))
+      );
+      this.recordHaikuUsage('recall', this.sessions.current.id, result);
+      const byId = new Map(candidates.map((m) => [m.id, m]));
+      return result.data.map((id) => byId.get(id)).filter((m): m is TaskMemory => !!m);
+    } catch (e: any) {
+      this.log.appendLine(`[task-memory recall error] ${e?.message ?? e}`);
+      return candidates.slice(0, 3);
+    }
+  }
+
+  /**
+   * Background freshness check for task memories: stats every tracked file
+   * and flags ones whose mtime/size moved since the memory was last
+   * refreshed (i.e. edited outside the extension — extension edits always
+   * go through upsertTaskMemory, which resyncs the tracked stat). Purely
+   * mechanical, no model call — cheap enough to run on a timer (see
+   * extension.ts) without surprising API spend. Skipped while a turn is
+   * in flight so it never contends with real work.
+   */
+  async pollTaskMemoryFreshness(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    const root = this.tryWorkspaceRoot();
+    if (!root) {
+      return;
+    }
+    try {
+      const store = await this.ensureTaskMemory();
+      for (const mem of store.forProject(root)) {
+        const files: Record<string, TaskMemoryFile> = {};
+        const staleFiles: string[] = [];
+        let changed = false;
+        for (const [rel, tracked] of Object.entries(mem.files)) {
+          try {
+            const st = await fs.stat(path.join(root, rel));
+            if (st.mtimeMs !== tracked.mtimeMs || st.size !== tracked.size) {
+              staleFiles.push(rel);
+              files[rel] = { mtimeMs: st.mtimeMs, size: st.size };
+              changed = true;
+            } else {
+              files[rel] = tracked;
+            }
+          } catch {
+            changed = true; // file deleted — drop it from tracking
+          }
+        }
+        if (changed) {
+          store.update(mem.id, { files, staleFiles });
+        }
+      }
+    } catch (e: any) {
+      this.log.appendLine(`[task-memory poll error] ${e?.message ?? e}`);
+    }
   }
 
   private buildToolContext(session: Session, memory: MemoryStore, client: Anthropic | undefined): ToolContext {
@@ -1413,6 +1595,7 @@ export class Controller {
         summary: result.data.summary,
         highlights: result.data.highlights,
       });
+      await this.upsertTaskMemory(session, client);
     } catch (e: any) {
       this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
     }

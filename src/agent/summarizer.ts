@@ -198,6 +198,118 @@ export async function summarizeFile(
   return { ...result, data: parsed.summary };
 }
 
+export interface TaskMemoryDraft {
+  summary: string;
+  keyPoints: string[];
+}
+
+const TASK_MEMORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: {
+      type: 'string',
+      description: '2-4 sentences: what was done, why, and how — enough for a future task on these files to skip rediscovering it',
+    },
+    keyPoints: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Up to 5 short bullet points: key decisions, gotchas, or file responsibilities worth remembering',
+    },
+  },
+  required: ['summary', 'keyPoints'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call that turns a task's transcript + touched files into a
+ * durable task memory — stored in TaskMemoryStore (see taskMemoryStore.ts) so
+ * a later task on the same files can reuse it as context instead of
+ * rediscovering the code through read/glob/grep round trips. Pass
+ * `previousSummary` to refresh an existing memory mid-task rather than
+ * starting over.
+ */
+export async function createTaskMemory(
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  session: Session,
+  touchedFiles: string[],
+  previousSummary?: string
+): Promise<SummaryTaskResult<TaskMemoryDraft>> {
+  const transcript = buildTranscript(session).slice(-8000);
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: TASK_MEMORY_SCHEMA,
+    maxTokens: 400,
+    prompt: [
+      previousSummary
+        ? `Update this project task memory with what happened since it was last written.\nPrevious memory:\n"""${previousSummary}"""`
+        : 'Write a durable task memory for a coding agent working on this project.',
+      session.taskSummary ? `Task: ${session.taskSummary}` : '',
+      touchedFiles.length ? `Files touched:\n${touchedFiles.map((f) => `- ${f}`).join('\n')}` : '',
+      `Transcript excerpt (most recent last):\n"""${transcript}"""`,
+      '',
+      'Summarize what was done, why, and how, plus any key points a future task on these files should know.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  });
+  const parsed = (result.structured ?? JSON.parse(result.text)) as TaskMemoryDraft;
+  return { ...result, data: parsed };
+}
+
+export interface TaskMemoryCandidate {
+  id: number;
+  title: string;
+  summary: string;
+}
+
+const MEMORY_RECALL_SCHEMA = {
+  type: 'object',
+  properties: {
+    relevantIds: {
+      type: 'array',
+      items: { type: 'integer' },
+      description: 'IDs of task memories directly useful for the upcoming task, most relevant first. Empty if none are clearly relevant.',
+    },
+  },
+  required: ['relevantIds'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call that picks which task memories (if any) in a project are
+ * relevant to an upcoming task, so a new task can fast-forward on files it
+ * has already touched instead of rediscovering them. Falls back to recency
+ * on error.
+ */
+export async function findRelevantMemories(
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  upcomingTask: string,
+  candidates: TaskMemoryCandidate[],
+  limit = 5
+): Promise<SummaryTaskResult<number[]>> {
+  if (candidates.length === 0) {
+    return { data: [], text: '', structured: [], backend: 'credits', usage: emptyUsage(), estValueUsd: 0 };
+  }
+  const list = candidates.map((c) => `#${c.id}: ${c.title} — ${c.summary}`).join('\n');
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: MEMORY_RECALL_SCHEMA,
+    maxTokens: 200,
+    prompt: [
+      'A new task is starting in this project. Decide which past task memories, if any, are directly relevant or helpful for it.',
+      `Upcoming task:\n"""${upcomingTask.slice(0, 2000)}"""`,
+      `Task memories in this project:\n${list}`,
+      `Return at most ${limit} memory IDs, most relevant first. Return an empty array if none are clearly helpful — don't force irrelevant matches.`,
+    ].join('\n\n'),
+  });
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { relevantIds: number[] };
+  return { ...result, data: parsed.relevantIds.slice(0, limit) };
+}
+
 function emptyUsage() {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 }
