@@ -1153,6 +1153,7 @@ export class Controller {
       let plan = '';
       let toolCalls = 0;
       let truncated = false;
+      let truncatedBySubMaxTurns = false;
       let noticeText = '';
 
       const subAlias = this.subscriptionModelAlias(model);
@@ -1172,10 +1173,11 @@ export class Controller {
           abort: this.abort!,
           onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
         });
-        if (!subResult.isError && subResult.plan) {
+        if ((!subResult.isError || subResult.errorText === 'error_max_turns') && subResult.plan) {
           plan = subResult.plan;
           toolCalls = subResult.toolCalls;
-          truncated = subResult.truncated;
+          truncatedBySubMaxTurns = subResult.errorText === 'error_max_turns';
+          truncated = subResult.truncated || truncatedBySubMaxTurns;
           this.subTotals.inputTokens += subResult.usage.inputTokens;
           this.subTotals.outputTokens += subResult.usage.outputTokens;
           this.subTotals.cacheReadTokens += subResult.usage.cacheReadTokens;
@@ -1252,7 +1254,9 @@ export class Controller {
         if (truncated) {
           this.post({
             type: 'notice',
-            text: 'The plan hit its output cap even after continuing — it may be incomplete. Raise claudeCoder.planningMaxTokens if this keeps happening.',
+            text: truncatedBySubMaxTurns
+              ? 'The plan hit its exploration turn cap even after continuing — it may be incomplete. Raise claudeCoder.planningMaxToolCalls if this keeps happening.'
+              : 'The plan hit its output cap even after continuing — it may be incomplete. Raise claudeCoder.planningMaxTokens if this keeps happening.',
           });
         }
         // Escalation continuations (carryOver set) already got an explicit "escalate?" confirmation — don't ask twice.
