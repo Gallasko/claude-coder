@@ -35,6 +35,7 @@ import {
   findRelevantChats,
   summarizeCommitMessage,
   summarizeFile,
+  preprocessFileForPlanning,
   createTaskMemory,
   findRelevantMemories,
 } from './agent/summarizer';
@@ -966,6 +967,11 @@ export class Controller {
             // the session's readCache would make the executor "reuse" file
             // contents it never actually received.
             readCache: new Map<string, string>(),
+            // Planner-only: condense whole-file reads down to what's
+            // relevant to this task before they reach the reasoning-tier
+            // model, saving input tokens. Not set on the executor's ctx
+            // (buildToolContext) so editing turns still see exact content.
+            preprocessRead: (path: string, content: string) => this.preprocessReadForPlanning(client, path, content, text),
           }
         : undefined;
       this.post({ type: 'working', phase: 'planning', tokens: 0 });
@@ -1567,6 +1573,27 @@ export class Controller {
       return result.data;
     } catch (e: any) {
       this.log.appendLine(`[file summarize error] ${e?.message ?? e}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Best-effort task-focused condenser for planner reads (see tools.ts
+   * readFileTool preprocessRead). Never throws — a missed condensation just
+   * falls through to the normal numbered file output.
+   */
+  private async preprocessReadForPlanning(
+    client: Anthropic | undefined,
+    filePath: string,
+    content: string,
+    task: string
+  ): Promise<string | undefined> {
+    try {
+      const result = await preprocessFileForPlanning(client, this.tryWorkspaceRoot(), filePath, content, task);
+      this.recordHaikuUsage('preprocess', this.sessions.current.id, result);
+      return result.data;
+    } catch (e: any) {
+      this.log.appendLine(`[file preprocess error] ${e?.message ?? e}`);
       return undefined;
     }
   }

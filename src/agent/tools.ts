@@ -166,6 +166,14 @@ export interface ToolContext {
   readCache: Map<string, string>;
   /** Best-effort file summarizer for the lazy read cache (see summarizer.ts summarizeFile). Absent when no API client is configured. */
   summarizeFile?: (path: string, content: string) => Promise<string | undefined>;
+  /**
+   * Task-focused condenser for planner reads (see summarizer.ts
+   * preprocessFileForPlanning) — strips content irrelevant to the current
+   * task before it reaches the reasoning-tier model. Distinct from
+   * summarizeFile's whole-file digest cache. Only set on planner contexts;
+   * its presence is what marks a ctx as a planner ctx.
+   */
+  preprocessRead?: (path: string, content: string, task: string) => Promise<string | undefined>;
 }
 
 function fileHash(content: string): string {
@@ -234,6 +242,23 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
   // need to be resent — the model still has them in its own transcript.
   if (wholeFile && ctx.readCache.get(display) === hash) {
     return `${display}: unchanged since it was read in full earlier in this session (hash ${hash}) — reuse that content, no need to re-read.`;
+  }
+
+  // Planner-only: condense the file down to what's relevant to the task
+  // before it reaches the reasoning-tier model. Never applied to partial
+  // reads (already targeted) or forced full reads (editing needs exact
+  // content). Not written to the persistent summary cache — that cache is
+  // keyed to whole-file digests, not task-specific relevance.
+  if (wholeFile && !forceFull && ctx.preprocessRead && !raw.includes(String.fromCharCode(0)) && raw.length > 2000) {
+    try {
+      const condensed = await ctx.preprocessRead(display, raw, ctx.taskSummary);
+      if (condensed) {
+        ctx.readCache.set(display, hash);
+        return `${display}: condensed for planning — pass full:true / offset for exact lines.\n\n${condensed}`;
+      }
+    } catch {
+      // fall through to the normal numbered output below
+    }
   }
 
   const lines = raw.split('\n');

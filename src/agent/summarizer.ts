@@ -198,6 +198,49 @@ export async function summarizeFile(
   return { ...result, data: parsed.summary };
 }
 
+const PLANNING_CONDENSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    relevant: {
+      type: 'string',
+      description:
+        'Only the parts of this file relevant to the planning task: signatures, relevant functions, and structure. ' +
+        'Drop unrelated code, comments, and boilerplate. Preserve line-number references where useful.',
+    },
+  },
+  required: ['relevant'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call that condenses a file down to what's relevant to a
+ * specific planning task, before it reaches the reasoning-tier model doing
+ * the planning (see tools.ts readFileTool, controller.ts planIfNeeded).
+ * Distinct from summarizeFile's whole-file digest, which isn't task-aware.
+ */
+export async function preprocessFileForPlanning(
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  filePath: string,
+  content: string,
+  task: string
+): Promise<SummaryTaskResult<string>> {
+  const trimmed = content.slice(0, 20_000);
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: PLANNING_CONDENSE_SCHEMA,
+    maxTokens: 600,
+    prompt: [
+      `Planning task: ${task.slice(0, 2000)}`,
+      `Given this planning task, extract only the parts of this file a planner needs: ${filePath}`,
+      `"""${trimmed}"""`,
+    ].join('\n\n'),
+  });
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { relevant: string };
+  return { ...result, data: parsed.relevant };
+}
+
 export interface TaskMemoryDraft {
   summary: string;
   keyPoints: string[];

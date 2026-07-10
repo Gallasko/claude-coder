@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
-export type UsageKind = 'turn' | 'classify' | 'compress' | 'compact' | 'plan' | 'subscription' | 'summarize' | 'recall';
+export type UsageKind = 'turn' | 'classify' | 'compress' | 'compact' | 'plan' | 'subscription' | 'summarize' | 'recall' | 'preprocess';
 
 export interface UsageRecord {
   timestamp: number;
