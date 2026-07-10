@@ -28,6 +28,7 @@ import { UsagePanel } from './usage/panel';
 import { ChatHistoryStore } from './agent/chatHistoryStore';
 import { ProjectStore } from './agent/projectStore';
 import { SummaryStore, SummaryRecord } from './agent/summaryStore';
+import { MessageStore } from './agent/messageStore';
 import { summarizeSession, findRelevantChats, summarizeCommitMessage, summarizeFile } from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
 import {
@@ -86,6 +87,9 @@ export class Controller {
   /** Persistent, cross-workspace end-of-task chat summaries — see summaryStore.ts / summarizer.ts. */
   private summaryStore: SummaryStore | undefined;
   private readonly summaryStoreReady: Promise<SummaryStore>;
+  /** Persistent, cross-workspace raw transcript (every user/assistant turn) — see messageStore.ts. */
+  private messageStore: MessageStore | undefined;
+  private readonly messageStoreReady: Promise<MessageStore>;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -99,6 +103,7 @@ export class Controller {
     this.chatHistoryStoreReady = this.initChatHistoryStore();
     this.projectStoreReady = this.initProjectStore();
     this.summaryStoreReady = this.initSummaryStore();
+    this.messageStoreReady = this.initMessageStore();
     this.context.subscriptions.push(
       vscode.workspace.registerTextDocumentContentProvider('claude-coder-diff', {
         provideTextDocumentContent: (uri) => this.diffVirtualContent.get(uri.toString()) ?? '',
@@ -134,6 +139,13 @@ export class Controller {
     return store;
   }
 
+  private async initMessageStore(): Promise<MessageStore> {
+    const dir = this.context.globalStorageUri.fsPath;
+    const store = await MessageStore.load(path.join(dir, 'chat-messages.json'));
+    this.messageStore = store;
+    return store;
+  }
+
   /** Best-effort: a disk hiccup here must never interrupt an in-flight turn. */
   private recordUsage(entry: Omit<UsageRecord, 'timestamp'>): void {
     this.usageStore?.record(entry);
@@ -161,7 +173,8 @@ export class Controller {
   async showChatHistory(): Promise<void> {
     const store = await this.chatHistoryStoreReady;
     const summaries = await this.summaryStoreReady;
-    ChatHistoryPanel.show(store, summaries, this.tryWorkspaceRoot());
+    const messages = await this.messageStoreReady;
+    ChatHistoryPanel.show(store, summaries, messages, this.tryWorkspaceRoot());
   }
 
   attachUi(ui: UiSink): void {
@@ -524,6 +537,12 @@ export class Controller {
         : { session: this.sessions.current, planApproved: true };
       this.ensureChatRecord(session, text);
       this.chatHistoryStore?.recordPrompt(session.id, text.length);
+      this.messageStore?.add({
+        chatId: session.id,
+        projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+        role: 'user',
+        text,
+      });
 
       if (!planApproved) {
         this.post({ type: 'turnDone', stopReason: 'cancelled' });
@@ -714,6 +733,14 @@ export class Controller {
         costUsd: 0,
         assistantChars: assistantCharsThisTurn,
       });
+      if (result.finalText) {
+        this.messageStore?.add({
+          chatId: session.id,
+          projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+          role: 'assistant',
+          text: result.finalText,
+        });
+      }
       this.post({ type: 'turnDone', stopReason: result.stopReason });
       this.postSessionInfo();
       if (this.autoCompact()) {
@@ -774,6 +801,12 @@ export class Controller {
     session.sdkSessionId = result.sdkSessionId ?? session.sdkSessionId;
     if (result.finalText) {
       session.assistantLog.push(result.finalText);
+      this.messageStore?.add({
+        chatId: session.id,
+        projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+        role: 'assistant',
+        text: result.finalText,
+      });
     }
     this.subTotals.inputTokens += result.usage.inputTokens;
     this.subTotals.outputTokens += result.usage.outputTokens;

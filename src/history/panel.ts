@@ -1,25 +1,41 @@
 import * as vscode from 'vscode';
 import { ChatHistoryStore } from '../agent/chatHistoryStore';
 import { SummaryStore } from '../agent/summaryStore';
+import { MessageStore } from '../agent/messageStore';
 import { displayName, formatUsd } from '../agent/models';
+
+interface DetailData {
+  title: string;
+  project: string;
+  model: string;
+  createdAt: number;
+  reflections: { summary: string; highlights: string[]; createdAt: number }[];
+  messages: { role: 'user' | 'assistant'; text: string; createdAt: number }[];
+}
 
 /** Singleton webview panel listing every recorded chat (cost, length, duration, summary). */
 export class ChatHistoryPanel {
   private static current: ChatHistoryPanel | undefined;
   private readonly panel: vscode.WebviewPanel;
 
-  static show(store: ChatHistoryStore, summaries: SummaryStore, currentProjectPath: string | undefined): void {
+  static show(
+    store: ChatHistoryStore,
+    summaries: SummaryStore,
+    messages: MessageStore,
+    currentProjectPath: string | undefined
+  ): void {
     if (ChatHistoryPanel.current) {
       ChatHistoryPanel.current.panel.reveal(vscode.ViewColumn.Active);
       ChatHistoryPanel.current.render();
       return;
     }
-    ChatHistoryPanel.current = new ChatHistoryPanel(store, summaries, currentProjectPath);
+    ChatHistoryPanel.current = new ChatHistoryPanel(store, summaries, messages, currentProjectPath);
   }
 
   private constructor(
     private readonly store: ChatHistoryStore,
     private readonly summaries: SummaryStore,
+    private readonly messages: MessageStore,
     private readonly currentProjectPath: string | undefined
   ) {
     this.panel = vscode.window.createWebviewPanel(
@@ -35,6 +51,7 @@ export class ChatHistoryPanel {
       if (msg?.type === 'reset') {
         this.store.reset();
         this.summaries.reset();
+        this.messages.reset();
         this.render();
       }
     });
@@ -60,7 +77,7 @@ export class ChatHistoryPanel {
         const durationMs = Math.max(0, c.updatedAt - c.createdAt);
         const isCurrent = this.currentProjectPath && c.projectPath === this.currentProjectPath;
         const latest = this.summaries.latestForChat(c.id);
-        return `<tr class="${isCurrent ? 'current' : ''}">
+        return `<tr class="chat-row ${isCurrent ? 'current' : ''}" data-chat-id="${c.id}">
           <td>${new Date(c.createdAt).toLocaleString()}</td>
           <td>${esc(c.projectName)}</td>
           <td>${esc(c.title || '(untitled)')}</td>
@@ -75,6 +92,27 @@ export class ChatHistoryPanel {
         </tr>`;
       })
       .join('');
+
+    const details: Record<number, DetailData> = {};
+    for (const c of chats) {
+      details[c.id] = {
+        title: c.title || '(untitled)',
+        project: c.projectName,
+        model: displayName(c.model),
+        createdAt: c.createdAt,
+        reflections: this.summaries.forChat(c.id).map((s) => ({
+          summary: s.summary,
+          highlights: s.highlights,
+          createdAt: s.createdAt,
+        })),
+        messages: this.messages.forChat(c.id).map((m) => ({
+          role: m.role,
+          text: m.text,
+          createdAt: m.createdAt,
+        })),
+      };
+    }
+    const detailsJson = JSON.stringify(details).replace(/</g, '\\u003c');
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -94,9 +132,24 @@ export class ChatHistoryPanel {
     td.summary { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
     th { opacity: 0.7; font-weight: 500; }
     tr.current { background: var(--vscode-list-inactiveSelectionBackground); }
+    .chat-row { cursor: pointer; }
+    .chat-row:hover { background: var(--vscode-list-hoverBackground); }
     button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     .empty { opacity: 0.6; font-style: italic; }
+    #detail { display: none; background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; }
+    #detail h2 { margin: 0 0 4px; font-size: 15px; }
+    #detail .meta { opacity: 0.7; font-size: 12px; margin-bottom: 10px; }
+    #detail .reflection { border-top: 1px solid var(--vscode-widget-border); padding: 8px 0; }
+    #detail .reflection:first-of-type { border-top: none; }
+    #detail .reflection .when { opacity: 0.6; font-size: 11px; }
+    #detail ul { margin: 4px 0 0; padding-left: 18px; }
+    #detail h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; opacity: 0.7; }
+    #detail .transcript { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    #detail .msg { border-radius: 6px; padding: 6px 10px; max-width: 90%; white-space: pre-wrap; font-size: 12px; }
+    #detail .msg .when { opacity: 0.6; font-size: 10px; margin-bottom: 2px; }
+    #detail .msg.user { align-self: flex-end; background: var(--vscode-list-inactiveSelectionBackground); }
+    #detail .msg.assistant { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
   </style>
 </head>
 <body>
@@ -115,10 +168,100 @@ export class ChatHistoryPanel {
       : '<p class="empty">No chats recorded yet.</p>'
   }
 
+  <div id="detail"></div>
+
   <button id="reset">Clear chat history</button>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const details = ${detailsJson};
+    const detailEl = document.getElementById('detail');
+
+    function fmt(ts) {
+      return new Date(ts).toLocaleString();
+    }
+
+    function renderDetail(id) {
+      const d = details[id];
+      if (!d) {
+        return;
+      }
+      detailEl.innerHTML = '';
+      const h2 = document.createElement('h2');
+      h2.textContent = d.title;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = d.project + ' · ' + d.model + ' · started ' + fmt(d.createdAt);
+      detailEl.appendChild(h2);
+      detailEl.appendChild(meta);
+
+      const transcriptHeading = document.createElement('h3');
+      transcriptHeading.textContent = 'Transcript';
+      detailEl.appendChild(transcriptHeading);
+
+      if (!d.messages.length) {
+        const p = document.createElement('p');
+        p.className = 'empty';
+        p.textContent = 'No messages recorded for this chat.';
+        detailEl.appendChild(p);
+      } else {
+        const transcript = document.createElement('div');
+        transcript.className = 'transcript';
+        for (const m of d.messages) {
+          const div = document.createElement('div');
+          div.className = 'msg ' + m.role;
+          const when = document.createElement('div');
+          when.className = 'when';
+          when.textContent = (m.role === 'user' ? 'You' : 'Claude') + ' · ' + fmt(m.createdAt);
+          const text = document.createElement('div');
+          text.textContent = m.text;
+          div.appendChild(when);
+          div.appendChild(text);
+          transcript.appendChild(div);
+        }
+        detailEl.appendChild(transcript);
+      }
+
+      const reflectionsHeading = document.createElement('h3');
+      reflectionsHeading.textContent = 'AI reflections';
+      detailEl.appendChild(reflectionsHeading);
+
+      if (!d.reflections.length) {
+        const p = document.createElement('p');
+        p.className = 'empty';
+        p.textContent = 'No reflections recorded for this chat.';
+        detailEl.appendChild(p);
+      } else {
+        for (const r of d.reflections) {
+          const div = document.createElement('div');
+          div.className = 'reflection';
+          const when = document.createElement('div');
+          when.className = 'when';
+          when.textContent = fmt(r.createdAt);
+          const summary = document.createElement('div');
+          summary.textContent = r.summary;
+          div.appendChild(when);
+          div.appendChild(summary);
+          if (r.highlights.length) {
+            const ul = document.createElement('ul');
+            for (const h of r.highlights) {
+              const li = document.createElement('li');
+              li.textContent = h;
+              ul.appendChild(li);
+            }
+            div.appendChild(ul);
+          }
+          detailEl.appendChild(div);
+        }
+      }
+      detailEl.style.display = 'block';
+      detailEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    document.querySelectorAll('.chat-row').forEach((row) => {
+      row.addEventListener('click', () => renderDetail(row.dataset.chatId));
+    });
+
     document.getElementById('reset').addEventListener('click', () => {
       if (confirm('Clear all recorded chat history? This cannot be undone.')) {
         vscode.postMessage({ type: 'reset' });
