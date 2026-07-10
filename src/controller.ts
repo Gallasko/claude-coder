@@ -1698,6 +1698,7 @@ export class Controller {
       });
       await this.upsertTaskMemory(session, client);
       this.lastArchivedTurns.set(sessionKey, session.turns);
+      this.post({ type: 'notice', text: 'Saved to memory.' });
     } catch (e: any) {
       this.log.appendLine(`[summarize error] ${e?.message ?? e}`);
     }
