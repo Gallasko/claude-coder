@@ -262,6 +262,8 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
   const wholeFile = !input.offset && !input.limit;
   const forceFull = !!input.full;
 
+  await ctx.memory.whenSaved();
+
   // Lazy summary cache: for a whole-file read, check size+mtime against the
   // stored record BEFORE touching the file's content — if a summary was
   // generated against this exact size+mtime, serve it instead of reading and

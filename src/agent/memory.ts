@@ -55,6 +55,7 @@ const MAX_NOTES = 200;
 export class MemoryStore {
   private data: MemoryData = { files: {}, changes: [], notes: [], nextNoteId: 1 };
   private dirty = false;
+  private saveChain: Promise<void> = Promise.resolve();
 
   private constructor(private filePath: string) {}
 
@@ -90,13 +91,23 @@ export class MemoryStore {
     }
   }
 
+  /** Serializes writes so concurrent saves never race on the shared tmp path. */
+  private queueSave(): void {
+    this.saveChain = this.saveChain.then(() => this.save());
+  }
+
+  /** Resolves once all saves queued so far have completed — await before a new read. */
+  whenSaved(): Promise<void> {
+    return this.saveChain;
+  }
+
   /** Records a real (non-cached) read; preserves the existing summary/readCount. Returns the updated read count. */
   noteRead(filePath: string, hash: string): number {
     const existing = this.data.files[filePath];
     const readCount = (existing?.readCount ?? 0) + 1;
     this.data.files[filePath] = { ...existing, hash, lastReadAt: Date.now(), readCount };
     this.dirty = true;
-    void this.save();
+    this.queueSave();
     return readCount;
   }
 
@@ -111,7 +122,7 @@ export class MemoryStore {
       readCount,
     };
     this.dirty = true;
-    void this.save();
+    this.queueSave();
     return readCount;
   }
 
@@ -139,7 +150,7 @@ export class MemoryStore {
       summarizedAt: Date.now(),
     };
     this.dirty = true;
-    void this.save();
+    this.queueSave();
   }
 
   /** All cached file summaries, most recently generated first — for the /memory view. */
@@ -155,7 +166,7 @@ export class MemoryStore {
   forgetFile(filePath: string): void {
     if (delete this.data.files[filePath]) {
       this.dirty = true;
-      void this.save();
+      this.queueSave();
     }
   }
 
@@ -165,7 +176,7 @@ export class MemoryStore {
       this.data.changes.splice(0, this.data.changes.length - MAX_CHANGES);
     }
     this.dirty = true;
-    void this.save();
+    this.queueSave();
   }
 
   recentChanges(limit = 15): ChangeRecord[] {
@@ -180,7 +191,7 @@ export class MemoryStore {
       this.data.notes.splice(0, this.data.notes.length - MAX_NOTES);
     }
     this.dirty = true;
-    void this.save();
+    this.queueSave();
     return note;
   }
 
@@ -193,7 +204,7 @@ export class MemoryStore {
     this.data.notes = this.data.notes.filter((n) => n.id !== id);
     if (this.data.notes.length !== before) {
       this.dirty = true;
-      void this.save();
+      this.queueSave();
       return true;
     }
     return false;
