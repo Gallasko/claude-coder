@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -140,6 +140,11 @@
           "type": "number",
           "default": 8,
           "description": "Exploration budget for the planning model — the plan is forced once this many read-only tool calls have run."
+        },
+        "claudeCoder.repoMapTokens": {
+          "type": "number",
+          "default": 1024,
+          "description": "Token budget for the repo map fed to the planner: key files with declaration signatures, extracted from VS Code's language servers (no LLM cost, Aider-style). 0 disables it."
         },
         "claudeCoder.compressLongPrompts": {
           "type": "boolean",

@@ -9,6 +9,7 @@ import { Session, SessionManager } from './agent/session';
 import { runTurn } from './agent/loop';
 import { classifyPrompt } from './agent/classifier';
 import { planTask } from './agent/planner';
+import { buildRepoMap } from './agent/repoMap';
 import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext } from './agent/tools';
@@ -226,6 +227,10 @@ export class Controller {
 
   private planningMaxToolCalls(): number {
     return this.config().get<number>('planningMaxToolCalls') ?? 8;
+  }
+
+  private repoMapTokens(): number {
+    return this.config().get<number>('repoMapTokens') ?? 1024;
   }
 
   private compressLongPrompts(): boolean {
@@ -983,6 +988,20 @@ export class Controller {
           }
         : undefined;
       this.post({ type: 'working', phase: 'planning', tokens: 0 });
+      // Free structural orientation (language-server symbols, no LLM call)
+      // so the planner targets its expensive reads instead of searching blind.
+      const repoMap = plannerCtx
+        ? await buildRepoMap(this.workspaceRoot(), this.repoMapTokens(), memory).catch(() => '')
+        : '';
+      const digest = memory.projectDigest();
+      const plannerContext = [
+        digest ? `<project-memory>\n${digest}\n</project-memory>` : '',
+        repoMap
+          ? `<repo-map>\n${repoMap}</repo-map>\nThe repo map above lists key files with their declaration signatures only — use it to pick targeted read_file/grep calls.`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       const { plan, usage, toolCalls, truncated } = await planTask(
         client,
         model,
@@ -992,7 +1011,7 @@ export class Controller {
         {
           toolCtx: plannerCtx,
           maxToolCalls: this.planningMaxToolCalls(),
-          context: memory.projectDigest(),
+          context: plannerContext,
           signal: this.abort?.signal,
           onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
         }

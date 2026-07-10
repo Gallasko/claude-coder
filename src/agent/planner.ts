@@ -34,7 +34,7 @@ export interface PlanOptions {
   toolCtx?: ToolContext;
   /** Exploration budget; the plan is forced once it runs out (default 8). */
   maxToolCalls?: number;
-  /** Extra grounding prepended to the request (e.g. the project memory digest). */
+  /** Extra grounding prepended to the request, already wrapped in its own tags (e.g. project memory digest, repo map). */
   context?: string;
   signal?: AbortSignal;
   onToolUse?: (name: string, detail: string) => void;
@@ -78,7 +78,7 @@ export async function planTask(
       role: 'user',
       content: [
         taskSummary ? `Task: ${taskSummary}` : '',
-        opts.context ? `<project-memory>\n${opts.context}\n</project-memory>` : '',
+        opts.context ?? '',
         `Request:\n"""${userPrompt.slice(0, 4000)}"""`,
       ]
         .filter(Boolean)
