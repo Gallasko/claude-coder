@@ -45,10 +45,12 @@ export interface MemoryPanelData {
 export class MemoryPanel {
   private static current: MemoryPanel | undefined;
   private static onReload: ((path: string) => void) | undefined;
+  private static onOpenFile: ((path: string) => void) | undefined;
   private readonly panel: vscode.WebviewPanel;
 
-  static show(data: MemoryPanelData, onReload?: (path: string) => void): void {
+  static show(data: MemoryPanelData, onReload?: (path: string) => void, onOpenFile?: (path: string) => void): void {
     MemoryPanel.onReload = onReload;
+    MemoryPanel.onOpenFile = onOpenFile;
     if (MemoryPanel.current) {
       MemoryPanel.current.panel.reveal(vscode.ViewColumn.Active);
       MemoryPanel.current.render(data);
@@ -70,6 +72,8 @@ export class MemoryPanel {
     this.panel.webview.onDidReceiveMessage((msg) => {
       if (msg?.type === 'reload' && typeof msg.path === 'string') {
         MemoryPanel.onReload?.(msg.path);
+      } else if (msg?.type === 'open' && typeof msg.path === 'string') {
+        MemoryPanel.onOpenFile?.(msg.path);
       }
     });
     this.render(data);
@@ -120,7 +124,7 @@ export class MemoryPanel {
         (s) =>
           `<li><span class="tag tag-${esc(s.status)}">${esc(s.status)}</span>${
             s.detail === 'detailed' ? '<span class="tag tag-detail">detailed</span>' : ''
-          } ${esc(s.path)} — ${esc(s.summary)} <span class="meta">(read ${s.readCount}×)</span> <button class="reload" data-path="${esc(s.path)}">Reload</button></li>`
+          } <a class="file-link" data-path="${esc(s.path)}" href="#">${esc(s.path)}</a> — ${esc(s.summary)} <span class="meta">(read ${s.readCount}×)</span> <button class="reload" data-path="${esc(s.path)}">Reload</button></li>`
       )
       .join('');
 
@@ -158,6 +162,8 @@ export class MemoryPanel {
     button.reload { font-size: 10px; margin-left: 6px; padding: 0 6px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; border-radius: 3px; }
     button.reload:hover { background: var(--vscode-button-secondaryHoverBackground); }
     button.reload:disabled { opacity: 0.6; cursor: default; }
+    .file-link { color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; }
+    .file-link:hover { text-decoration: underline; }
     #toast { position: fixed; bottom: 16px; right: 16px; background: var(--vscode-notifications-background, #333); color: var(--vscode-notifications-foreground, #fff); border: 1px solid var(--vscode-widget-border); border-radius: 4px; padding: 8px 12px; font-size: 12px; opacity: 0; transform: translateY(8px); transition: opacity 0.15s ease, transform 0.15s ease; pointer-events: none; }
     #toast.show { opacity: 1; transform: translateY(0); }
   </style>
@@ -186,6 +192,12 @@ export class MemoryPanel {
         btn.disabled = true;
         btn.textContent = 'Reloading…';
         vscode.postMessage({ type: 'reload', path: btn.dataset.path });
+        return;
+      }
+      const link = e.target.closest('.file-link');
+      if (link) {
+        e.preventDefault();
+        vscode.postMessage({ type: 'open', path: link.dataset.path });
       }
     });
     let toastTimer;

@@ -1403,7 +1403,24 @@ export class Controller {
         }))
       : [];
 
-    MemoryPanel.show({ notes, changes, fileSummaries, taskMemories, root }, (p) => void this.reloadCachedFile(p));
+    MemoryPanel.show(
+      { notes, changes, fileSummaries, taskMemories, root },
+      (p) => void this.reloadCachedFile(p),
+      (p) => void this.openMemoryFile(p)
+    );
+  }
+
+  /** Opens a cached file's actual source beside the Memory panel (file-summary row click). */
+  private async openMemoryFile(filePath: string): Promise<void> {
+    const root = this.tryWorkspaceRoot();
+    const abs = root ? (path.isAbsolute(filePath) ? filePath : path.join(root, filePath)) : filePath;
+    try {
+      const uri = vscode.Uri.file(abs);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+    } catch {
+      MemoryPanel.notice('Could not open file (it may have been deleted)');
+    }
   }
 
   /** Manually refreshes a single file's read-cache summary (Memory panel "Reload" button). */
