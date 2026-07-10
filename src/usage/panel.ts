@@ -79,6 +79,11 @@ export class UsagePanel {
       modelColors[m] = MODEL_COLOR_SLOTS[i % MODEL_COLOR_SLOTS.length];
     });
 
+    const modelDisplayNames: Record<string, string> = {};
+    modelOrder.forEach((m) => {
+      modelDisplayNames[m] = displayName(m);
+    });
+
     const legendRows = s.byModel
       .map(
         (m) =>
@@ -142,7 +147,7 @@ export class UsagePanel {
     .graph-controls button { opacity: 0.6; margin-right: 4px; }
     .graph-controls button.active { opacity: 1; }
     .graph { display: flex; align-items: flex-end; gap: 2px; height: 140px; border-bottom: 1px solid var(--vscode-widget-border); padding: 0 4px; }
-    .graph-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 2px; }
+    .graph-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 2px; cursor: default; }
     .graph-bar .bar { width: 100%; display: flex; flex-direction: column-reverse; border-radius: 2px 2px 0 0; min-height: 1px; overflow: hidden; }
     .graph-bar .bar-segment { width: 100%; }
     .graph-bar .bar-segment + .bar-segment { border-top: 1px solid var(--vscode-editorWidget-background); }
@@ -151,6 +156,12 @@ export class UsagePanel {
     .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; }
     .legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--legend-light); }
     body.vscode-dark .legend-swatch, body.vscode-high-contrast .legend-swatch { background: var(--legend-dark); }
+    .tooltip { position: fixed; display: none; pointer-events: none; z-index: 100; max-width: 280px; background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border); border-radius: 6px; padding: 8px 10px; font-size: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3); }
+    .tooltip .tooltip-title { font-weight: 600; margin-bottom: 4px; }
+    .tooltip .tooltip-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; white-space: nowrap; }
+    .tooltip .tooltip-row .name { display: flex; align-items: center; gap: 6px; }
+    .tooltip .tooltip-row .name .legend-swatch { flex: none; }
+    .tooltip .tooltip-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--vscode-widget-border); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -200,6 +211,8 @@ export class UsagePanel {
 
   <button id="reset">Clear usage history</button>
 
+  <div id="tooltip" class="tooltip"></div>
+
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     document.getElementById('reset').addEventListener('click', () => {
@@ -211,6 +224,7 @@ export class UsagePanel {
     const graphData = ${JSON.stringify(graphData)};
     const modelOrder = ${JSON.stringify(modelOrder)};
     const modelColors = ${JSON.stringify(modelColors)};
+    const modelDisplayNames = ${JSON.stringify(modelDisplayNames)};
 
     function colorFor(model) {
       const c = modelColors[model] || modelColors[modelOrder[modelOrder.length - 1]];
@@ -218,11 +232,79 @@ export class UsagePanel {
       return dark ? c.dark : c.light;
     }
 
+    function formatUsdJs(n) {
+      return n < 0.01 && n > 0 ? '$' + n.toFixed(4) : '$' + n.toFixed(2);
+    }
+
+    const tooltipEl = document.getElementById('tooltip');
+
+    function positionTooltip(evt) {
+      if (!tooltipEl) {
+        return;
+      }
+      const pad = 12;
+      const rect = tooltipEl.getBoundingClientRect();
+      let x = evt.clientX + pad;
+      let y = evt.clientY + pad;
+      if (x + rect.width > window.innerWidth) {
+        x = evt.clientX - rect.width - pad;
+      }
+      if (y + rect.height > window.innerHeight) {
+        y = evt.clientY - rect.height - pad;
+      }
+      tooltipEl.style.left = Math.max(0, x) + 'px';
+      tooltipEl.style.top = Math.max(0, y) + 'px';
+    }
+
+    function showTooltip(evt, bucket) {
+      if (!tooltipEl) {
+        return;
+      }
+      const slices = bucket.models.filter((m) => m.requests > 0).sort((a, b) => b.costUsd - a.costUsd);
+      const rows = slices.length
+        ? slices
+            .map((s) => {
+              const name = modelDisplayNames[s.model] || s.model;
+              return (
+                '<div class="tooltip-row"><span class="name"><span class="legend-swatch" style="background:' +
+                colorFor(s.model) +
+                '"></span>' +
+                name +
+                '</span><span>' +
+                formatUsdJs(s.costUsd) +
+                ' (' +
+                s.requests +
+                ' req)</span></div>'
+              );
+            })
+            .join('')
+        : '<div class="tooltip-row"><span>No usage</span></div>';
+      tooltipEl.innerHTML =
+        '<div class="tooltip-title">' +
+        bucket.key +
+        '</div>' +
+        rows +
+        '<div class="tooltip-row tooltip-total"><span>Total</span><span>' +
+        formatUsdJs(bucket.costUsd) +
+        ' (' +
+        bucket.requests +
+        ' req)</span></div>';
+      tooltipEl.style.display = 'block';
+      positionTooltip(evt);
+    }
+
+    function hideTooltip() {
+      if (tooltipEl) {
+        tooltipEl.style.display = 'none';
+      }
+    }
+
     function renderGraph(gran) {
       const graphEl = document.getElementById('graph');
       if (!graphEl) {
         return;
       }
+      hideTooltip();
       graphEl.innerHTML = '';
       const buckets = graphData[gran];
       const maxCost = Math.max(0, ...buckets.map((b) => b.costUsd));
@@ -250,11 +332,13 @@ export class UsagePanel {
           const segValue = useCost ? slice.costUsd : slice.requests;
           seg.style.flexGrow = String(Math.max(segValue, slices.length ? 0.0001 : 1));
           seg.style.background = colorFor(slice.model);
-          seg.title = b.key + ' - ' + slice.model + ': ' + slice.requests + ' req, $' + slice.costUsd.toFixed(4);
           bar.appendChild(seg);
         });
 
         col.appendChild(bar);
+        col.addEventListener('mouseenter', (evt) => showTooltip(evt, b));
+        col.addEventListener('mousemove', positionTooltip);
+        col.addEventListener('mouseleave', hideTooltip);
 
         const label = document.createElement('div');
         label.className = 'bar-label';
