@@ -211,7 +211,7 @@ export class Controller {
   }
 
   private planningMaxTokens(): number {
-    return this.config().get<number>('planningMaxTokens') ?? 1024;
+    return this.config().get<number>('planningMaxTokens') ?? 2048;
   }
 
   private planningExploration(): boolean {
@@ -969,7 +969,7 @@ export class Controller {
           }
         : undefined;
       this.post({ type: 'working', phase: 'planning', tokens: 0 });
-      const { plan, usage, toolCalls } = await planTask(
+      const { plan, usage, toolCalls, truncated } = await planTask(
         client,
         model,
         session.taskSummary,
@@ -1004,6 +1004,12 @@ export class Controller {
           type: 'notice',
           text: `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
         });
+        if (truncated) {
+          this.post({
+            type: 'notice',
+            text: 'The plan hit its output cap even after continuing — it may be incomplete. Raise claudeCoder.planningMaxTokens if this keeps happening.',
+          });
+        }
         // Escalation continuations (carryOver set) already got an explicit "escalate?" confirmation — don't ask twice.
         if (session.carryOver === undefined && this.requirePlanApproval()) {
           const approved = await this.requestPlanApproval(plan);

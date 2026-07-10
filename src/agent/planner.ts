@@ -19,6 +19,8 @@ export interface PlanResult {
   usage: Anthropic.Usage;
   /** Number of read-only tool calls the planner made while exploring. */
   toolCalls: number;
+  /** True if the plan is still cut off after the continuation budget. */
+  truncated: boolean;
 }
 
 export interface PlanOptions {
@@ -112,8 +114,37 @@ export async function planTask(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
     );
     if (!exploring || toolUses.length === 0) {
-      const text = response.content.find((b) => b.type === 'text');
-      return { plan: text && text.type === 'text' ? text.text.trim() : '', usage, toolCalls };
+      const first = response.content.find((b) => b.type === 'text');
+      let plan = first && first.type === 'text' ? first.text : '';
+      let stopReason = response.stop_reason;
+      // A grounded plan can outgrow max_tokens; continue it (bounded) rather
+      // than handing the executor a spec cut off mid-word. The accumulated
+      // plan rides as a trailing assistant message — trimEnd() is mandatory
+      // (the API rejects assistant prefill ending in whitespace), and the
+      // continuation resumes from that exact prefix so plain concatenation
+      // reassembles the text.
+      for (let extra = 0; stopReason === 'max_tokens' && extra < 2 && plan.trim(); extra++) {
+        messages.push({ role: 'assistant', content: plan.trimEnd() });
+        const cont = await client.messages.create(
+          {
+            model,
+            max_tokens: maxTokens,
+            system: PLAN_SYSTEM,
+            messages,
+            // tools stay (the transcript may hold tool_use blocks) but no
+            // tool_choice: combined with a trailing assistant message the
+            // API can reject it.
+            ...(opts.toolCtx ? { tools: READ_ONLY_TOOLS } : {}),
+          },
+          { signal: opts.signal }
+        );
+        addUsage(cont.usage);
+        messages.pop();
+        const t = cont.content.find((b) => b.type === 'text');
+        plan = plan.trimEnd() + (t && t.type === 'text' ? t.text : '');
+        stopReason = cont.stop_reason;
+      }
+      return { plan: plan.trim(), usage, toolCalls, truncated: stopReason === 'max_tokens' };
     }
 
     messages.push({ role: 'assistant', content: response.content });

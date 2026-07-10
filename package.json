@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -128,8 +128,8 @@
         },
         "claudeCoder.planningMaxTokens": {
           "type": "number",
-          "default": 1024,
-          "description": "Hard cap on the planning call's output tokens (the reasoning tier is the most expensive per token)."
+          "default": 2048,
+          "description": "Hard cap on the planning call's output tokens per request (the reasoning tier is the most expensive per token). A plan that hits the cap auto-continues for up to 2 extra requests before being flagged as possibly incomplete."
         },
         "claudeCoder.planningExploration": {
           "type": "boolean",
