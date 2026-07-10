@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -57,6 +57,10 @@
       {
         "command": "claudeCoder.showUsageHistory",
         "title": "Claude Coder: Show Usage History & Billing"
+      },
+      {
+        "command": "claudeCoder.showSubscriptionUsage",
+        "title": "Claude Coder: Show Subscription Plan Usage (rate limits)"
       },
       {
         "command": "claudeCoder.showMemory",

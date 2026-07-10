@@ -20,6 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeCoder.escalate', () => controller.escalate()),
     vscode.commands.registerCommand('claudeCoder.showCosts', () => controller.showCosts()),
     vscode.commands.registerCommand('claudeCoder.showUsageHistory', () => controller.showUsageHistory()),
+    vscode.commands.registerCommand('claudeCoder.showSubscriptionUsage', () => controller.showSubscriptionUsage()),
     vscode.commands.registerCommand('claudeCoder.showMemory', () => controller.showMemory()),
     vscode.commands.registerCommand('claudeCoder.addMemoryNote', async () => {
       const text = await vscode.window.showInputBox({

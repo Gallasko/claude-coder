@@ -103,6 +103,7 @@
     { name: 'escalate', desc: 'Restart task on the next bigger model' },
     { name: 'costs', desc: 'Show session cost breakdown' },
     { name: 'usage', desc: 'Show usage history & billing tracker' },
+    { name: 'plan-usage', desc: 'Show Claude subscription plan rate limits (5-hour & weekly)' },
     { name: 'history', desc: 'Show all chats & sessions' },
     { name: 'memory', desc: 'Show project memory (notes, changes, file summaries)' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
@@ -182,6 +183,9 @@
         break;
       case 'usage':
         vscode.postMessage({ type: 'showUsageHistory' });
+        break;
+      case 'plan-usage':
+        vscode.postMessage({ type: 'showSubscriptionUsage' });
         break;
       case 'history':
         vscode.postMessage({ type: 'showChatHistory' });

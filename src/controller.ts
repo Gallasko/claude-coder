@@ -14,7 +14,13 @@ import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext, AskQuestionItem } from './agent/tools';
 import { MemoryStore } from './agent/memory';
-import { runSubscriptionTurn, runSubscriptionPlan, SubscriptionTurnResult, HaikuTaskResult } from './agent/sdkBackend';
+import {
+  runSubscriptionTurn,
+  runSubscriptionPlan,
+  fetchSubscriptionRateLimit,
+  SubscriptionTurnResult,
+  HaikuTaskResult,
+} from './agent/sdkBackend';
 import { resetCliCache } from './agent/cliLocator';
 import { BackendPreference, DEFAULT_BACKEND_PREFERENCE, allowsFallback } from './config';
 import {
@@ -189,6 +195,29 @@ export class Controller {
   async showUsageHistory(): Promise<void> {
     const store = await this.usageStoreReady;
     UsagePanel.show(store);
+  }
+
+  /** Reports claude.ai plan rate-limit utilization (5-hour + weekly windows) for the logged-in Claude Code CLI. */
+  async showSubscriptionUsage(): Promise<void> {
+    try {
+      const { windows } = await fetchSubscriptionRateLimit();
+      if (!windows.length) {
+        this.post({ type: 'notice', text: 'No plan rate-limit data available — this account may not have plan limits.' });
+        return;
+      }
+      const lines = windows.map((w) => {
+        const pct = w.utilization != null ? `${Math.round(w.utilization)}% used` : 'usage unknown';
+        const resets = w.resetsAt ? `, resets ${new Date(w.resetsAt).toLocaleString()}` : '';
+        return `${w.label}: ${pct}${resets}`;
+      });
+      this.post({ type: 'notice', text: ['Claude subscription plan usage:', ...lines].join('\n') });
+    } catch (e: any) {
+      if (e?.setupNeeded) {
+        this.postSetupCard('Claude subscription not available', `${e.message}\n\nRun the setup to log in, or check with \`claude /usage\` in a terminal.`);
+        return;
+      }
+      this.post({ type: 'notice', text: `Couldn't fetch subscription usage: ${describeError(e)}` });
+    }
   }
 
   async showChatHistory(): Promise<void> {

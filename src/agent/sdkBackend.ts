@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { z } from 'zod';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -123,6 +125,26 @@ export interface SubUsage {
   cacheWriteTokens: number;
 }
 
+export interface SubscriptionRateLimitWindow {
+  label: string;
+  utilization: number | undefined;
+  resetsAt: string | undefined;
+}
+
+export interface SubscriptionRateLimit {
+  windows: SubscriptionRateLimitWindow[];
+}
+
+/** Shared between the opportunistic SDKRateLimitEvent capture and the direct oauth/usage fetch below. */
+const RATE_LIMIT_LABELS: Record<string, string> = {
+  five_hour: '5-hour',
+  seven_day: 'Weekly',
+  seven_day_opus: 'Weekly (Opus)',
+  seven_day_sonnet: 'Weekly (Sonnet)',
+  seven_day_overage_included: 'Weekly (overage included)',
+  overage: 'Overage',
+};
+
 export interface SubscriptionTurnResult {
   finalText: string;
   sdkSessionId: string | undefined;
@@ -132,6 +154,8 @@ export interface SubscriptionTurnResult {
   isError: boolean;
   errorText: string | undefined;
   numTurns: number;
+  /** Plan rate-limit windows observed via SDKRateLimitEvent during this turn, if the SDK emitted any. */
+  rateLimit?: SubscriptionRateLimit;
 }
 
 export interface SubscriptionTurnParams {
@@ -228,6 +252,68 @@ function buildSubscriptionEnv(): Record<string, string> {
   return env;
 }
 
+function readOauthAccessToken(): string | undefined {
+  try {
+    const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+    const credPath = path.join(configDir, '.credentials.json');
+    if (!fs.existsSync(credPath)) {
+      return undefined;
+    }
+    const parsed = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+    const token = parsed?.claudeAiOauth?.accessToken;
+    return typeof token === 'string' ? token : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fetches claude.ai plan rate-limit utilization (5-hour + weekly windows)
+ * from the same local Claude Code login the subscription backend runs turns
+ * on. Undocumented endpoint — parsed defensively, only fields present are
+ * surfaced. Never uses ANTHROPIC_API_KEY; this is the OAuth token only.
+ */
+export async function fetchSubscriptionRateLimit(): Promise<SubscriptionRateLimit> {
+  const token = readOauthAccessToken();
+  if (!token) {
+    throw new SetupNeededError(
+      'No Claude Code subscription login found — run `claude` in a terminal to log in.',
+      'cli-logged-out'
+    );
+  }
+
+  const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+    },
+  });
+
+  if (response.status === 401) {
+    throw new SetupNeededError(
+      'Claude Code login expired — run `claude` in a terminal to log in again.',
+      'cli-logged-out'
+    );
+  }
+  if (!response.ok) {
+    throw new Error(`Rate limit lookup failed: ${response.status} ${response.statusText}`);
+  }
+
+  const data: any = await response.json();
+  const windows: SubscriptionRateLimitWindow[] = [];
+  for (const key of Object.keys(RATE_LIMIT_LABELS)) {
+    const w = data?.[key];
+    if (w && typeof w === 'object') {
+      windows.push({
+        label: RATE_LIMIT_LABELS[key],
+        utilization: typeof w.utilization === 'number' ? w.utilization : undefined,
+        resetsAt: typeof w.resets_at === 'string' ? w.resets_at : undefined,
+      });
+    }
+  }
+  return { windows };
+}
+
 export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<SubscriptionTurnResult> {
   let approxChars = 0;
   let lastEmit = 0;
@@ -318,6 +404,7 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
   let isError = false;
   let errorText: string | undefined;
   const usage: SubUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const rateLimitWindows = new Map<string, SubscriptionRateLimitWindow>();
 
   progress('sending request', 0, true);
 
@@ -385,12 +472,33 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
         break;
       }
 
+      case 'rate_limit_event': {
+        const info = message.rate_limit_info;
+        if (info.rateLimitType) {
+          rateLimitWindows.set(info.rateLimitType, {
+            label: RATE_LIMIT_LABELS[info.rateLimitType] ?? info.rateLimitType,
+            utilization: info.utilization,
+            resetsAt: info.resetsAt ? new Date(info.resetsAt).toISOString() : undefined,
+          });
+        }
+        break;
+      }
+
       default:
         break;
     }
   }
 
-  return { finalText, sdkSessionId, estValueUsd, usage, isError, errorText, numTurns };
+  return {
+    finalText,
+    sdkSessionId,
+    estValueUsd,
+    usage,
+    isError,
+    errorText,
+    numTurns,
+    rateLimit: rateLimitWindows.size ? { windows: [...rateLimitWindows.values()] } : undefined,
+  };
 }
 
 /** Read-only workspace-fs tools the subscription planner may call — mirrors planner.ts's READ_ONLY_TOOLS. */
