@@ -189,12 +189,14 @@ export class UsagePanel {
         bar.title = b.key + ': ' + b.requests + ' req, $' + b.costUsd.toFixed(4);
         col.appendChild(bar);
 
+        const label = document.createElement('div');
+        label.className = 'bar-label';
         if (i % tickEvery === 0 || i === buckets.length - 1) {
-          const label = document.createElement('div');
-          label.className = 'bar-label';
           label.textContent = b.key;
-          col.appendChild(label);
+        } else {
+          label.innerHTML = '&nbsp;';
         }
+        col.appendChild(label);
 
         graphEl.appendChild(col);
       });
