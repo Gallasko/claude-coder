@@ -242,6 +242,61 @@ body {
   word-break: normal;
 }
 
+.msg.question {
+  border: 1px solid var(--vscode-inputValidation-infoBorder, #3794ff);
+  border-radius: 6px;
+  background: var(--vscode-inputValidation-infoBackground, rgba(55, 148, 255, 0.08));
+}
+
+.question-block + .question-block {
+  margin-top: 10px;
+}
+
+.question-header-chip {
+  display: inline-block;
+  font-size: 0.75em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  margin-bottom: 4px;
+}
+
+.question-text {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.question-options {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.question-option {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.question-option.selected {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.question-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.question-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .msg.setup {
   border: 1px solid var(--vscode-focusBorder);
   border-radius: 6px;

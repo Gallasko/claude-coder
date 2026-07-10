@@ -35,6 +35,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case 'permissionResponse':
           this.controller.handlePermissionResponse(msg.id, String(msg.choice));
           break;
+        case 'askQuestionResponse':
+          this.controller.handleAskQuestionResponse(msg.id, msg.answers ?? {});
+          break;
         case 'showCosts':
           this.controller.showCosts();
           break;

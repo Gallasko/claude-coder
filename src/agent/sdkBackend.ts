@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type Anthropic from '@anthropic-ai/sdk';
 import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, Options, PermissionResult, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { PermissionRequest, ToolContext } from './tools';
+import type { PermissionRequest, ToolContext, AskQuestionItem } from './tools';
 import { executeTool } from './tools';
 import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
@@ -146,6 +146,7 @@ export interface SubscriptionTurnParams {
   maxTurns: number;
   abort: AbortController;
   requestPermission: (req: PermissionRequest) => Promise<boolean>;
+  requestQuestion: (questions: AskQuestionItem[]) => Promise<Record<string, string>>;
   onText: (delta: string) => void;
   onToolUse: (name: string, detail: string) => void;
   onProgress: (phase: string, approxTokens: number) => void;
@@ -246,6 +247,11 @@ export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<Su
   const redirectedCmds = new Set<string>();
 
   const canUseTool: CanUseTool = async (toolName, input): Promise<PermissionResult> => {
+    if (toolName === 'AskUserQuestion') {
+      const questions = ((input as Record<string, unknown>).questions ?? []) as AskQuestionItem[];
+      const answers = await p.requestQuestion(questions);
+      return { behavior: 'allow', updatedInput: { ...input, answers } };
+    }
     if (toolName === 'Bash') {
       const redirect = redirectFsCommand(String((input as Record<string, unknown>).command ?? ''));
       if (redirect) {

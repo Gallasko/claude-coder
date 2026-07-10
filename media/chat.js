@@ -398,6 +398,123 @@
         }
         break;
       }
+      case 'askQuestion': {
+        streamEl = null;
+        const card = document.createElement('div');
+        card.className = 'msg question';
+        card.dataset.questionId = String(msg.id);
+
+        const questionEls = [];
+
+        (msg.questions || []).forEach((q) => {
+          const qBlock = document.createElement('div');
+          qBlock.className = 'question-block';
+
+          const chip = document.createElement('span');
+          chip.className = 'question-header-chip';
+          chip.textContent = q.header || '';
+          qBlock.appendChild(chip);
+
+          const qText = document.createElement('div');
+          qText.className = 'question-text';
+          qText.textContent = q.question;
+          qBlock.appendChild(qText);
+
+          const optionsEl = document.createElement('div');
+          optionsEl.className = 'question-options';
+          const selected = new Set();
+
+          (q.options || []).forEach((opt) => {
+            const b = document.createElement('button');
+            b.className = 'question-option';
+            b.textContent = opt.label;
+            if (opt.description) {
+              b.title = opt.description;
+            }
+            b.addEventListener('click', () => {
+              if (q.multiSelect) {
+                if (selected.has(opt.label)) {
+                  selected.delete(opt.label);
+                  b.classList.remove('selected');
+                } else {
+                  selected.add(opt.label);
+                  b.classList.add('selected');
+                }
+              } else {
+                selected.clear();
+                optionsEl.querySelectorAll('.question-option').forEach((el) => el.classList.remove('selected'));
+                selected.add(opt.label);
+                b.classList.add('selected');
+              }
+              submitBtn.disabled = questionEls.some((qe) => qe.selected.size === 0);
+            });
+            optionsEl.appendChild(b);
+          });
+
+          qBlock.appendChild(optionsEl);
+          card.appendChild(qBlock);
+          questionEls.push({ question: q.question, selected });
+        });
+
+        const actions = document.createElement('div');
+        actions.className = 'question-actions';
+
+        const respond = (finalAnswers) => {
+          vscode.postMessage({ type: 'askQuestionResponse', id: msg.id, answers: finalAnswers });
+        };
+
+        const submitBtn = document.createElement('button');
+        submitBtn.className = 'question-submit';
+        submitBtn.textContent = 'Submit';
+        submitBtn.disabled = questionEls.some((qe) => qe.selected.size === 0);
+        submitBtn.addEventListener('click', () => {
+          const finalAnswers = {};
+          questionEls.forEach((qe) => {
+            finalAnswers[qe.question] = Array.from(qe.selected).join(', ');
+          });
+          respond(finalAnswers);
+        });
+
+        const skipBtn = document.createElement('button');
+        skipBtn.className = 'perm-no';
+        skipBtn.textContent = 'Skip';
+        skipBtn.addEventListener('click', () => {
+          const finalAnswers = {};
+          questionEls.forEach((qe) => {
+            finalAnswers[qe.question] = '';
+          });
+          respond(finalAnswers);
+        });
+
+        actions.appendChild(submitBtn);
+        actions.appendChild(skipBtn);
+        card.appendChild(actions);
+
+        messagesEl.appendChild(card);
+        scrollDown();
+        break;
+      }
+      case 'askQuestionResolved': {
+        const card = messagesEl.querySelector('.question[data-question-id="' + msg.id + '"]');
+        if (card) {
+          card.querySelectorAll('.question-option').forEach((el) => {
+            el.disabled = true;
+          });
+          const actions = card.querySelector('.question-actions');
+          if (actions) {
+            actions.remove();
+          }
+          const verdict = document.createElement('div');
+          verdict.className = 'perm-verdict allowed';
+          verdict.style.whiteSpace = 'pre-wrap';
+          const entries = Object.entries(msg.answers || {});
+          verdict.textContent = entries.length
+            ? entries.map(([q, a]) => q + ': ' + (a || '(skipped)')).join('\n')
+            : '(skipped)';
+          card.appendChild(verdict);
+        }
+        break;
+      }
       case 'notice':
         addMsg('notice', msg.text);
         break;

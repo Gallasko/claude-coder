@@ -12,10 +12,11 @@ import { planTask } from './agent/planner';
 import { buildRepoMap } from './agent/repoMap';
 import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
-import { PermissionRequest, ToolContext } from './agent/tools';
+import { PermissionRequest, ToolContext, AskQuestionItem } from './agent/tools';
 import { MemoryStore } from './agent/memory';
 import { runSubscriptionTurn, runSubscriptionPlan, SubscriptionTurnResult, HaikuTaskResult } from './agent/sdkBackend';
 import { resetCliCache } from './agent/cliLocator';
+import { BackendPreference, DEFAULT_BACKEND_PREFERENCE, allowsFallback } from './config';
 import {
   creditsReady,
   describeSetupGap,
@@ -87,6 +88,7 @@ export class Controller {
   private static readonly IDLE_SAVE_DELAY_MS = 2.5 * 60 * 1000;
 
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
+  private questionResolvers = new Map<number, (answers: Record<string, string>) => void>();
   private permissionId = 0;
   /** Virtual document content for diff-preview URIs (scheme `claude-coder-diff`), keyed by uri.toString(). */
   private diffVirtualContent = new Map<string, string>();
@@ -258,6 +260,15 @@ export class Controller {
     return this.config().get<boolean>('useSubscription') ?? true;
   }
 
+  /** New preference key wins when set; otherwise falls back to the deprecated boolean. */
+  private backendPreference(): BackendPreference {
+    const configured = this.config().get<BackendPreference>('backendPreference');
+    if (configured) {
+      return configured;
+    }
+    return this.config().get<boolean>('useSubscription') === false ? 'apiOnly' : DEFAULT_BACKEND_PREFERENCE;
+  }
+
   private subscriptionModel(): string {
     return this.config().get<string>('subscriptionModel') ?? 'sonnet';
   }
@@ -277,7 +288,8 @@ export class Controller {
   }
 
   private defaultBackend(): Session['backend'] {
-    return this.useSubscription() ? 'subscription' : 'credits';
+    const pref = this.backendPreference();
+    return pref === 'apiOnly' || pref === 'preferApi' ? 'credits' : 'subscription';
   }
 
   private post(message: Record<string, unknown>): void {
@@ -319,9 +331,13 @@ export class Controller {
   private async offerSetupIfNeeded(): Promise<void> {
     try {
       const state = await detectSetup(this.context);
-      const ready = this.useSubscription()
-        ? subscriptionReady(state) || creditsReady(state)
-        : creditsReady(state);
+      const pref = this.backendPreference();
+      const ready =
+        pref === 'apiOnly'
+          ? creditsReady(state)
+          : pref === 'subscriptionOnly'
+          ? subscriptionReady(state)
+          : subscriptionReady(state) || creditsReady(state);
       if (!ready) {
         this.postSetupCard(
           'Welcome to Claude Coder — finish setting up',
@@ -384,6 +400,26 @@ export class Controller {
     if (resolver) {
       const c: PermissionChoice = choice === 'always' ? 'always' : choice === 'yes' ? 'yes' : 'no';
       resolver(c);
+    }
+  }
+
+  /** Puts a clarifying multiple-choice question card in the chat and waits for the user's answers. */
+  private async requestQuestion(questions: AskQuestionItem[]): Promise<Record<string, string>> {
+    const id = ++this.permissionId;
+    const answersPromise = new Promise<Record<string, string>>((resolve) => {
+      this.questionResolvers.set(id, resolve);
+    });
+    this.post({ type: 'askQuestion', id, questions });
+    const answers = await answersPromise;
+    this.questionResolvers.delete(id);
+    this.post({ type: 'askQuestionResolved', id, answers });
+    return answers;
+  }
+
+  handleAskQuestionResponse(id: number, answers: Record<string, string>): void {
+    const resolver = this.questionResolvers.get(Number(id));
+    if (resolver) {
+      resolver(answers);
     }
   }
 
@@ -611,9 +647,11 @@ export class Controller {
 
       // ---- subscription backend (Agent SDK, billed to the user's plan) ----
       if (session.backend === 'subscription') {
+        const preference = this.backendPreference();
+        const canFallbackToCredits = allowsFallback(preference) && !!client;
         try {
           const result = await this.runSubscription(session, content, minimize, memory, client);
-          if (result.isError && isUsageLimitOrModelError(result.errorText)) {
+          if (result.isError && isUsageLimitOrModelError(result.errorText) && canFallbackToCredits) {
             // Subscription usage limit hit or the model isn't available on
             // this plan — fall back to API credits for this turn automatically,
             // no user confirmation needed.
@@ -674,9 +712,11 @@ export class Controller {
             kind: 'command',
             key: `sub-unavailable:${++this.permissionId}`,
             title: 'Claude subscription unavailable',
-            detail:
-              `${reason}\n\nThis may just be a connection hiccup with Claude Code, or it may need attention ` +
-              '(install/login). Choose "Yes" to retry the subscription now, or "No" to fall back to API credits for this task.',
+            detail: canFallbackToCredits
+              ? `${reason}\n\nThis may just be a connection hiccup with Claude Code, or it may need attention ` +
+                '(install/login). Choose "Yes" to retry the subscription now, or "No" to fall back to API credits for this task.'
+              : `${reason}\n\nThis may just be a connection hiccup with Claude Code, or it may need attention ` +
+                '(install/login). Backend preference is "Subscription only", so this task will not fall back to API credits. Choose "Yes" to retry.',
           });
           if (retry) {
             try {
@@ -693,12 +733,24 @@ export class Controller {
               return;
             } catch (e2: any) {
               this.log.appendLine(`[sub retry error] ${e2?.stack ?? e2}`);
+              if (!canFallbackToCredits) {
+                this.post({
+                  type: 'notice',
+                  text: `Subscription still unavailable (${e2?.message ?? e2}). Backend preference is "Subscription only" — no fallback available.`,
+                });
+                this.post({ type: 'turnDone', stopReason: 'error' });
+                return;
+              }
               this.post({
                 type: 'notice',
                 text: `Subscription still unavailable (${e2?.message ?? e2}) — falling back to API credits for this task.`,
               });
             }
           } else {
+            if (!canFallbackToCredits) {
+              this.post({ type: 'turnDone', stopReason: 'cancelled' });
+              return;
+            }
             this.post({
               type: 'notice',
               text:
@@ -840,6 +892,7 @@ export class Controller {
       maxTurns: 100,
       abort: this.abort!,
       requestPermission: (req) => this.requestPermission(req),
+      requestQuestion: (questions) => this.requestQuestion(questions),
       onText: (delta) => this.post({ type: 'delta', text: delta }),
       onToolUse: (name, detail) => this.post({ type: 'toolUse', name, detail }),
       onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
@@ -1633,6 +1686,7 @@ export class Controller {
       // Tries the subscription's Haiku before falling back to credits (see
       // summarizeFileForMemory) — available even for subscription-only users.
       summarizeFile: (path, content, detailed) => this.summarizeFileForMemory(client, path, content, detailed),
+      askQuestion: (questions) => this.requestQuestion(questions),
     };
   }
 

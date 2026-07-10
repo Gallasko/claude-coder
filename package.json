@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.27",
+  "version": "0.1.30",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -98,7 +98,24 @@
         "claudeCoder.useSubscription": {
           "type": "boolean",
           "default": true,
-          "description": "Run tasks through the Claude Agent SDK using your Claude Code login (Pro/Max plan) instead of API credits. Planning, classification and escalations still use credits. Requires Claude Code installed and logged in."
+          "description": "Deprecated — superseded by claudeCoder.backendPreference (kept for back-compat; only read when backendPreference is unset). Run tasks through the Claude Agent SDK using your Claude Code login (Pro/Max plan) instead of API credits. Planning, classification and escalations still use credits. Requires Claude Code installed and logged in."
+        },
+        "claudeCoder.backendPreference": {
+          "type": "string",
+          "enum": [
+            "subscriptionOnly",
+            "apiOnly",
+            "preferSubscription",
+            "preferApi"
+          ],
+          "enumDescriptions": [
+            "Only run on your Claude Code subscription (Pro/Max). Never spend API credits; tasks fail if the subscription is unavailable.",
+            "Only run on API credits. Never use the subscription backend, even if logged in.",
+            "Prefer the subscription backend; fall back to API credits if the subscription is unavailable or over its limit.",
+            "Prefer API credits; fall back to the subscription backend if no API key is configured or credits fail."
+          ],
+          "default": "preferSubscription",
+          "description": "Which backend to run tasks on and how to fall back: subscriptionOnly, apiOnly, preferSubscription (default), or preferApi. Supersedes claudeCoder.useSubscription."
         },
         "claudeCoder.subscriptionModel": {
           "type": "string",

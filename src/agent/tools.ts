@@ -138,7 +138,51 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
       required: [],
     },
   },
+  {
+    name: 'ask_question',
+    description:
+      'Ask the user one or more clarifying multiple-choice questions when genuinely blocked on a decision only they can make. ' +
+      'Do not use this for things discoverable by reading the code. 1-4 questions, 2-4 options each.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: 'The complete question to ask, ending with a question mark' },
+              header: { type: 'string', description: 'Very short label for this question (max 12 chars)' },
+              options: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string', description: 'Short display text for this choice' },
+                    description: { type: 'string', description: 'What this option means or implies' },
+                  },
+                  required: ['label', 'description'],
+                },
+                description: '2-4 distinct, mutually exclusive choices (unless multiSelect is true)',
+              },
+              multiSelect: { type: 'boolean', description: 'Allow selecting more than one option' },
+            },
+            required: ['question', 'header', 'options', 'multiSelect'],
+          },
+          description: '1-4 questions to ask the user',
+        },
+      },
+      required: ['questions'],
+    },
+  },
 ];
+
+export interface AskQuestionItem {
+  question: string;
+  header: string;
+  options: { label: string; description: string }[];
+  multiSelect: boolean;
+}
 
 export interface PermissionRequest {
   kind: 'command' | 'edit' | 'outside-read' | 'outside-write';
@@ -176,6 +220,8 @@ export interface ToolContext {
    * its presence is what marks a ctx as a planner ctx.
    */
   preprocessRead?: (path: string, content: string, task: string) => Promise<string | undefined>;
+  /** Ask the user one or more clarifying multiple-choice questions in the chat. Resolves to answers keyed by question text. */
+  askQuestion: (questions: AskQuestionItem[]) => Promise<Record<string, string>>;
 }
 
 function fileHash(content: string): string {
@@ -605,6 +651,15 @@ async function diagnosticsTool(ctx: ToolContext, input: any): Promise<string> {
   return lines.length === 0 ? 'No errors or warnings.' : truncate(lines.slice(0, 200).join('\n'));
 }
 
+async function askQuestionTool(ctx: ToolContext, input: any): Promise<string> {
+  const questions: AskQuestionItem[] = Array.isArray(input.questions) ? input.questions : [];
+  if (questions.length === 0) {
+    throw new Error('questions must be a non-empty array.');
+  }
+  const answers = await ctx.askQuestion(questions);
+  return JSON.stringify({ answers });
+}
+
 const EXECUTORS: Record<string, (ctx: ToolContext, input: any) => Promise<string>> = {
   read_file: readFileTool,
   write_file: writeFileTool,
@@ -614,6 +669,7 @@ const EXECUTORS: Record<string, (ctx: ToolContext, input: any) => Promise<string
   grep: grepTool,
   run_command: runCommandTool,
   get_diagnostics: diagnosticsTool,
+  ask_question: askQuestionTool,
 };
 
 export interface ToolOutcome {
