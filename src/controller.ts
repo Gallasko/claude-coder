@@ -190,6 +190,14 @@ export class Controller {
     return this.config().get<number>('planningMaxTokens') ?? 1024;
   }
 
+  private planningExploration(): boolean {
+    return this.config().get<boolean>('planningExploration') ?? true;
+  }
+
+  private planningMaxToolCalls(): number {
+    return this.config().get<number>('planningMaxToolCalls') ?? 8;
+  }
+
   private compressLongPrompts(): boolean {
     return this.config().get<boolean>('compressLongPrompts') ?? false;
   }
@@ -871,6 +879,9 @@ export class Controller {
       }
       return { session, planApproved: true };
     } catch (e: any) {
+      if (e?.message === 'cancelled' || this.abort?.signal.aborted) {
+        throw e;
+      }
       // Classifier failure must never block the user; log and fall through.
       this.log.appendLine(`[classifier error] ${e?.message ?? e}`);
       return { session, planApproved: true };
@@ -896,7 +907,34 @@ export class Controller {
       return true;
     }
     try {
-      const { plan, usage } = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens());
+      // Let the reasoning tier look at the actual code before planning:
+      // read-only exploration through the shared tool executor, so its full
+      // reads also seed the lazy summary cache for the cheaper turns after.
+      const memory = await this.ensureMemory();
+      const plannerCtx = this.planningExploration()
+        ? {
+            ...this.buildToolContext(session, memory, client),
+            // The planner's transcript is discarded after this call — sharing
+            // the session's readCache would make the executor "reuse" file
+            // contents it never actually received.
+            readCache: new Map<string, string>(),
+          }
+        : undefined;
+      this.post({ type: 'working', phase: 'planning', tokens: 0 });
+      const { plan, usage, toolCalls } = await planTask(
+        client,
+        model,
+        session.taskSummary,
+        text,
+        this.planningMaxTokens(),
+        {
+          toolCtx: plannerCtx,
+          maxToolCalls: this.planningMaxToolCalls(),
+          context: memory.projectDigest(),
+          signal: this.abort?.signal,
+          onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+        }
+      );
       const totals = emptyTotals();
       addUsage(totals, usage);
       this.plannerCost += costUsd(totals, model);
@@ -916,7 +954,7 @@ export class Controller {
         session.plan = plan;
         this.post({
           type: 'notice',
-          text: `Plan drafted by ${displayName(model)} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
+          text: `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`,
         });
         // Escalation continuations (carryOver set) already got an explicit "escalate?" confirmation — don't ask twice.
         if (session.carryOver === undefined && this.requirePlanApproval()) {
@@ -930,6 +968,9 @@ export class Controller {
       }
       return true;
     } catch (e: any) {
+      if (this.abort?.signal.aborted) {
+        throw new Error('cancelled');
+      }
       // A missed plan must never block the user — Sonnet just implements without one.
       this.log.appendLine(`[planner error] ${e?.message ?? e}`);
       return true;

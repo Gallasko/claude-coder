@@ -252,7 +252,7 @@ async function readFileTool(ctx: ToolContext, input: any): Promise<string> {
     ctx.readCache.set(display, hash);
     // Best-effort, never blocks this read: refresh the summary cache for
     // next time, keyed to the size+mtime just read.
-    if (ctx.summarizeFile && !raw.includes(' ') && raw.length > 2000) {
+    if (ctx.summarizeFile && !raw.includes('\u0000') && raw.length > 2000) {
       fs.stat(abs)
         .then((stat) => ctx.summarizeFile!(display, raw).then((summary) => {
           if (summary) {

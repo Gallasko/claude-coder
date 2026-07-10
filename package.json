@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.20",
+  "version": "0.1.22",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -130,6 +130,16 @@
           "type": "number",
           "default": 1024,
           "description": "Hard cap on the planning call's output tokens (the reasoning tier is the most expensive per token)."
+        },
+        "claudeCoder.planningExploration": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let the planning model explore the codebase first (read-only grep/glob/read_file) so the plan cites real files and symbols. Its full reads also seed the lazy summary cache. Off = the old blind, tool-free plan."
+        },
+        "claudeCoder.planningMaxToolCalls": {
+          "type": "number",
+          "default": 8,
+          "description": "Exploration budget for the planning model — the plan is forced once this many read-only tool calls have run."
         },
         "claudeCoder.compressLongPrompts": {
           "type": "boolean",
