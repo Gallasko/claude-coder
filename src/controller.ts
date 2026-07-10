@@ -39,6 +39,7 @@ import {
   findRelevantMemories,
 } from './agent/summarizer';
 import { ChatHistoryPanel } from './history/panel';
+import { MemoryPanel } from './memory/panel';
 import {
   CLASSIFIER_MODEL,
   Complexity,
@@ -1103,16 +1104,14 @@ export class Controller {
 
   async showMemory(): Promise<void> {
     const memory = await this.ensureMemory();
-    const notes = memory.listNotes(20);
-    const changes = memory.recentChanges(20);
-    const summaries = memory.listSummaries(30);
+    const taskMemoryStore = await this.ensureTaskMemory();
     const root = this.tryWorkspaceRoot();
 
-    const noteLines = notes.map((n) => `${new Date(n.createdAt).toLocaleString()}  note  ${n.text}`);
-    const changeLines = changes.map(
-      (c) => `${new Date(c.timestamp).toLocaleString()}  ${c.tool}  ${c.path}  (${c.taskSummary || 'unknown task'})`
-    );
-    const summaryLines = (
+    const notes = memory.listNotes(20);
+    const changes = memory.recentChanges(30);
+    const summaries = memory.listSummaries(30);
+
+    const fileSummaries = (
       await Promise.all(
         summaries.map(async (s) => {
           const status = await this.summaryFreshness(root, s);
@@ -1121,21 +1120,25 @@ export class Controller {
             return undefined;
           }
           const firstLine = s.summary?.split('\n').find((l) => l.trim()) ?? '';
-          return `${new Date(s.summarizedAt ?? 0).toLocaleString()}  [${status}]  ${s.path}  — ${firstLine}`;
+          return { path: s.path, summary: firstLine, status, summarizedAt: s.summarizedAt ?? 0 };
         })
       )
-    ).filter((l): l is string => !!l);
+    ).filter((s): s is { path: string; summary: string; status: string; summarizedAt: number } => !!s);
 
-    const sections = [
-      noteLines.length ? `Notes:\n${noteLines.join('\n')}` : '',
-      changeLines.length ? `Recent changes:\n${changeLines.join('\n')}` : '',
-      summaryLines.length ? `File summaries (read_file lazy cache):\n${summaryLines.join('\n')}` : '',
-    ].filter(Boolean);
+    const taskMemories = root
+      ? taskMemoryStore.forProject(root, 50).map((m) => ({
+          id: m.id,
+          title: m.title,
+          summary: m.summary,
+          files: Object.keys(m.files),
+          staleFiles: m.staleFiles ?? [],
+          chatIds: m.chatIds,
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+        }))
+      : [];
 
-    vscode.window.showInformationMessage(
-      sections.length === 0 ? 'No project memory yet.' : sections.join('\n\n'),
-      { modal: true }
-    );
+    MemoryPanel.show({ notes, changes, fileSummaries, taskMemories, root });
   }
 
   /** Freshness label for a cached file summary — stats the file, doesn't re-read its content. */
