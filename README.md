@@ -24,7 +24,7 @@ Use this to run Claude Coder in your normal VS Code windows, on any project, wit
 4. Reload/restart VS Code. Open any project, click the **Claude Coder** icon in the activity bar.
 5. Run the setup from the chat's welcome card, `/setup`, or `Ctrl+Shift+P` → **Claude Coder: Setup** (subscription login and/or API key).
 
-To update after making changes: bump `version` in `package.json`, rebuild the `.vsix`, then reinstall (add `--force` to `code --install-extension` to overwrite the existing version).
+To update after making changes: bump `version` in `package.json`, rebuild the `.vsix`, then reinstall (add `--force` to `code --install-extension` to overwrite the existing version). On Windows, run `npm run bump:win` to execute the PowerShell script that performs the same steps.
 
 ## How it saves tokens
 
