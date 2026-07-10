@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { UsageStore } from '../agent/usageStore';
 import { displayName, formatUsd, PRICING } from '../agent/models';
+import { SubscriptionRateLimit } from '../agent/sdkBackend';
 
 /**
  * Fixed categorical slots (validated for CVD-safe adjacent separation in both
@@ -31,16 +32,27 @@ export class UsagePanel {
   private static current: UsagePanel | undefined;
   private readonly panel: vscode.WebviewPanel;
 
-  static show(store: UsageStore): void {
+  static show(
+    store: UsageStore,
+    rateLimit?: SubscriptionRateLimit,
+    fetchRateLimit?: () => Promise<SubscriptionRateLimit | undefined>
+  ): void {
     if (UsagePanel.current) {
+      UsagePanel.current.store = store;
+      UsagePanel.current.rateLimit = rateLimit;
+      UsagePanel.current.fetchRateLimit = fetchRateLimit;
       UsagePanel.current.panel.reveal(vscode.ViewColumn.Active);
       UsagePanel.current.render();
       return;
     }
-    UsagePanel.current = new UsagePanel(store);
+    UsagePanel.current = new UsagePanel(store, rateLimit, fetchRateLimit);
   }
 
-  private constructor(private readonly store: UsageStore) {
+  private constructor(
+    private store: UsageStore,
+    private rateLimit: SubscriptionRateLimit | undefined,
+    private fetchRateLimit: (() => Promise<SubscriptionRateLimit | undefined>) | undefined
+  ) {
     this.panel = vscode.window.createWebviewPanel(
       'claudeCoder.usage',
       'Claude Coder: Usage History',
@@ -50,9 +62,12 @@ export class UsagePanel {
     this.panel.onDidDispose(() => {
       UsagePanel.current = undefined;
     });
-    this.panel.webview.onDidReceiveMessage((msg) => {
+    this.panel.webview.onDidReceiveMessage(async (msg) => {
       if (msg?.type === 'reset') {
         this.store.reset();
+        this.render();
+      } else if (msg?.type === 'refreshPlanUsage') {
+        this.rateLimit = await this.fetchRateLimit?.();
         this.render();
       }
     });
@@ -111,6 +126,20 @@ export class UsagePanel {
       )
       .join('');
 
+    const planWindowRows = (this.rateLimit?.windows ?? [])
+      .map((w) => {
+        const pct = w.utilization != null ? Math.max(0, Math.min(100, Math.round(w.utilization))) : undefined;
+        const bar =
+          pct != null
+            ? `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div><div class="value">${pct}%</div>`
+            : `<div class="value">—</div>`;
+        const resets = w.resetsAt
+          ? `<div class="label">Resets ${new Date(w.resetsAt).toLocaleString()}</div>`
+          : '';
+        return `<div class="stat plan-window"><div class="label">${esc(w.label)}</div>${bar}${resets}</div>`;
+      })
+      .join('');
+
     const recentRows = this.store
       .recent(200)
       .map(
@@ -162,6 +191,11 @@ export class UsagePanel {
     .tooltip .tooltip-row .name { display: flex; align-items: center; gap: 6px; }
     .tooltip .tooltip-row .name .legend-swatch { flex: none; }
     .tooltip .tooltip-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--vscode-widget-border); font-weight: 600; }
+    .h2-row { display: flex; align-items: center; gap: 12px; }
+    .h2-row button { font-size: 11px; padding: 2px 8px; }
+    .plan-window { min-width: 160px; }
+    .bar-track { background: var(--vscode-widget-border); border-radius: 4px; height: 6px; margin: 6px 0 4px; overflow: hidden; }
+    .bar-fill { background: var(--vscode-button-background); height: 100%; }
   </style>
 </head>
 <body>
@@ -174,6 +208,13 @@ export class UsagePanel {
     )}</div></div>
     <div class="stat"><div class="label">Combined</div><div class="value">${formatUsd(totalCost)}</div></div>
   </div>
+
+  <div class="h2-row"><h2>Plan usage</h2><button id="refreshPlanUsage">Refresh</button></div>
+  ${
+    planWindowRows
+      ? `<div class="totals">${planWindowRows}</div>`
+      : '<p class="empty">Subscription plan usage unavailable — log in via the Claude Code CLI to see rate-limit windows here.</p>'
+  }
 
   <h2>Usage graph</h2>
   ${
@@ -219,6 +260,9 @@ export class UsagePanel {
       if (confirm('Clear all recorded usage history? This cannot be undone.')) {
         vscode.postMessage({ type: 'reset' });
       }
+    });
+    document.getElementById('refreshPlanUsage').addEventListener('click', () => {
+      vscode.postMessage({ type: 'refreshPlanUsage' });
     });
 
     const graphData = ${JSON.stringify(graphData)};

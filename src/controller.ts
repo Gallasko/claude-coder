@@ -19,6 +19,7 @@ import {
   runSubscriptionPlan,
   fetchSubscriptionRateLimit,
   SubscriptionTurnResult,
+  SubscriptionRateLimit,
   HaikuTaskResult,
 } from './agent/sdkBackend';
 import { resetCliCache } from './agent/cliLocator';
@@ -195,7 +196,8 @@ export class Controller {
 
   async showUsageHistory(): Promise<void> {
     const store = await this.usageStoreReady;
-    UsagePanel.show(store);
+    const rateLimit = await fetchSubscriptionRateLimit().catch(() => undefined);
+    UsagePanel.show(store, rateLimit, () => fetchSubscriptionRateLimit().catch(() => undefined));
   }
 
   /** Reports claude.ai plan rate-limit utilization (5-hour + weekly windows) for the logged-in Claude Code CLI. */
@@ -640,11 +642,9 @@ export class Controller {
         }
       }
 
-      // Routing/classification runs on Haiku via credits; without a key we
-      // just keep the current session going as-is.
-      const { session, planApproved } = client
-        ? await this.routePrompt(client, text)
-        : { session: this.sessions.current, planApproved: true };
+      // Routing/classification runs on Haiku, subscription-first with
+      // credits fallback — works for subscription-only users too.
+      const { session, planApproved } = await this.routePrompt(client, text);
       this.ensureChatRecord(session, text);
       this.chatHistoryStore?.recordPrompt(session.id, text.length);
       this.messageStore?.add({
@@ -1028,7 +1028,7 @@ export class Controller {
 
   // ---------- routing: task detection + complexity ----------
 
-  private async routePrompt(client: Anthropic, text: string): Promise<{ session: Session; planApproved: boolean }> {
+  private async routePrompt(client: Anthropic | undefined, text: string): Promise<{ session: Session; planApproved: boolean }> {
     const autoDetect = this.config().get<boolean>('autoTaskDetection') ?? true;
     const session = this.sessions.current;
 
@@ -1037,20 +1037,9 @@ export class Controller {
     }
 
     try {
-      const before = this.snapshotTotals(this.classifierTotals);
-      const c = await classifyPrompt(client, session.taskSummary, text, this.classifierTotals);
-      const delta = this.deltaTotals(before, this.classifierTotals);
-      this.recordUsage({
-        model: CLASSIFIER_MODEL,
-        backend: 'credits',
-        kind: 'classify',
-        sessionId: session.id,
-        inputTokens: delta.inputTokens,
-        outputTokens: delta.outputTokens,
-        cacheReadTokens: delta.cacheReadTokens,
-        cacheWriteTokens: delta.cacheWriteTokens,
-        costUsd: costUsd(delta, CLASSIFIER_MODEL),
-      });
+      const result = await classifyPrompt(client, this.tryWorkspaceRoot(), session.taskSummary, text);
+      this.recordHaikuUsage('classify', session.id, result);
+      const c = result.data;
       if (c.task === 'new' && session.turns > 0) {
         void this.archiveChat(session);
         const backend = this.defaultBackend();
@@ -1104,7 +1093,7 @@ export class Controller {
    * output-token-heavy reasoning.
    */
   /** Returns false if the user rejected the drafted plan — the caller must abort this turn. */
-  private async planIfNeeded(client: Anthropic, session: Session, complexity: Complexity, text: string): Promise<boolean> {
+  private async planIfNeeded(client: Anthropic | undefined, session: Session, complexity: Complexity, text: string): Promise<boolean> {
     if (complexity === 'trivial' || !this.planningEnabled()) {
       return true;
     }
@@ -1210,7 +1199,7 @@ export class Controller {
         }
       }
 
-      if (!plan) {
+      if (!plan && client) {
         const creditsResult = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens(), {
           toolCtx: plannerCtx,
           maxToolCalls: this.planningMaxToolCalls(),
