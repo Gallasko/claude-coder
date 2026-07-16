@@ -14,6 +14,7 @@ import { compressPrompt } from './agent/compressor';
 import { compactTranscript } from './agent/compactor';
 import { PermissionRequest, ToolContext, AskQuestionItem } from './agent/tools';
 import { MemoryStore } from './agent/memory';
+import { withRetry } from './agent/retry';
 import {
   runSubscriptionTurn,
   runSubscriptionPlan,
@@ -2111,8 +2112,6 @@ export class Controller {
  * plan can't access. Any other error (auth, bad request, etc.) surfaces
  * normally instead of silently spending credits.
  */
-const TRANSIENT_UI_ERROR_PATTERN = /ECONNRESET|EPIPE|ETIMEDOUT|socket hang up|closed|disconnect|connection|stream/i;
-
 /**
  * Opening the plan file (openTextDocument/showTextDocument) crosses the
  * extension-host <-> renderer RPC stream, which can drop transiently
@@ -2120,19 +2119,8 @@ const TRANSIENT_UI_ERROR_PATTERN = /ECONNRESET|EPIPE|ETIMEDOUT|socket hang up|cl
  * mode. Retry only on that class of error — a real failure (bad path,
  * permissions) should surface immediately, not get masked by retries.
  */
-async function withTransientRetry<T>(op: () => Promise<T>, attempts = 3): Promise<T> {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await op();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (attempt >= attempts || !TRANSIENT_UI_ERROR_PATTERN.test(message)) {
-        throw err;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-    }
-  }
-  throw new Error('unreachable');
+function withTransientRetry<T>(op: () => Promise<T>): Promise<T> {
+  return withRetry(op);
 }
 
 function isUsageLimitOrModelError(errorText: string | undefined): boolean {

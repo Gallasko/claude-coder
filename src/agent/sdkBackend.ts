@@ -11,6 +11,7 @@ import { SUBSCRIPTION_SYSTEM_APPEND, MINIMAL_OUTPUT_ADDENDUM } from './prompt';
 import { findClaudeCli, SetupNeededError } from './cliLocator';
 import { supportsAdaptiveThinking, CLASSIFIER_MODEL } from './models';
 import { PLAN_SYSTEM } from './planner';
+import { withRetry } from './retry';
 
 /**
  * Exposes the same tool set the credits backend uses (see tools.ts:
@@ -314,36 +315,16 @@ export async function fetchSubscriptionRateLimit(): Promise<SubscriptionRateLimi
   return { windows };
 }
 
-const PERMISSION_RETRY_ATTEMPTS = 3;
-const TRANSIENT_ERROR_PATTERN = /ECONNRESET|EPIPE|ETIMEDOUT|socket hang up|closed|disconnect|connection|stream/i;
-
-function isTransientPermissionError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  const code = (err as { code?: string } | undefined)?.code ?? '';
-  return TRANSIENT_ERROR_PATTERN.test(message) || TRANSIENT_ERROR_PATTERN.test(code);
-}
-
-async function withPermissionRetry<T>(
+function withPermissionRetry<T>(
   op: () => Promise<T>,
   onNotice: (message: string) => void,
   label: string,
   signal: AbortSignal,
 ): Promise<T> {
-  for (let attempt = 1; attempt <= PERMISSION_RETRY_ATTEMPTS; attempt++) {
-    if (signal.aborted) {
-      throw new Error('Aborted');
-    }
-    try {
-      return await op();
-    } catch (err) {
-      if (attempt >= PERMISSION_RETRY_ATTEMPTS || !isTransientPermissionError(err)) {
-        throw err;
-      }
-      onNotice(`Reconnecting to request permission for "${label}"…`);
-      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-    }
-  }
-  throw new Error('unreachable');
+  return withRetry(op, {
+    signal,
+    onRetry: () => onNotice(`Reconnecting to request permission for "${label}"…`),
+  });
 }
 
 export async function runSubscriptionTurn(p: SubscriptionTurnParams): Promise<SubscriptionTurnResult> {

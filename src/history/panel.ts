@@ -137,19 +137,20 @@ export class ChatHistoryPanel {
     button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     .empty { opacity: 0.6; font-style: italic; }
-    #detail { display: none; background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border); border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; }
-    #detail h2 { margin: 0 0 4px; font-size: 15px; }
-    #detail .meta { opacity: 0.7; font-size: 12px; margin-bottom: 10px; }
-    #detail .reflection { border-top: 1px solid var(--vscode-widget-border); padding: 8px 0; }
-    #detail .reflection:first-of-type { border-top: none; }
-    #detail .reflection .when { opacity: 0.6; font-size: 11px; }
-    #detail ul { margin: 4px 0 0; padding-left: 18px; }
-    #detail h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; opacity: 0.7; }
-    #detail .transcript { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-    #detail .msg { border-radius: 6px; padding: 6px 10px; max-width: 90%; white-space: pre-wrap; font-size: 12px; }
-    #detail .msg .when { opacity: 0.6; font-size: 10px; margin-bottom: 2px; }
-    #detail .msg.user { align-self: flex-end; background: var(--vscode-list-inactiveSelectionBackground); }
-    #detail .msg.assistant { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
+    .detail-row > td { padding: 0; }
+    .detail-row .detail { margin: 4px 0; background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-widget-border); border-radius: 6px; padding: 12px 16px; }
+    .detail h2 { margin: 0 0 4px; font-size: 15px; }
+    .detail .meta { opacity: 0.7; font-size: 12px; margin-bottom: 10px; }
+    .detail .reflection { border-top: 1px solid var(--vscode-widget-border); padding: 8px 0; }
+    .detail .reflection:first-of-type { border-top: none; }
+    .detail .reflection .when { opacity: 0.6; font-size: 11px; }
+    .detail ul { margin: 4px 0 0; padding-left: 18px; }
+    .detail h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; opacity: 0.7; }
+    .detail .transcript { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .detail .msg { border-radius: 6px; padding: 6px 10px; max-width: 90%; white-space: pre-wrap; font-size: 12px; }
+    .detail .msg .when { opacity: 0.6; font-size: 10px; margin-bottom: 2px; }
+    .detail .msg.user { align-self: flex-end; background: var(--vscode-list-inactiveSelectionBackground); }
+    .detail .msg.assistant { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
   </style>
 </head>
 <body>
@@ -168,14 +169,11 @@ export class ChatHistoryPanel {
       : '<p class="empty">No chats recorded yet.</p>'
   }
 
-  <div id="detail"></div>
-
   <button id="reset">Clear chat history</button>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const details = ${detailsJson};
-    const detailEl = document.getElementById('detail');
 
     function fmt(ts) {
       return new Date(ts).toLocaleString();
@@ -184,26 +182,27 @@ export class ChatHistoryPanel {
     function renderDetail(id) {
       const d = details[id];
       if (!d) {
-        return;
+        return null;
       }
-      detailEl.innerHTML = '';
+      const container = document.createElement('div');
+      container.className = 'detail';
       const h2 = document.createElement('h2');
       h2.textContent = d.title;
       const meta = document.createElement('div');
       meta.className = 'meta';
       meta.textContent = d.project + ' · ' + d.model + ' · started ' + fmt(d.createdAt);
-      detailEl.appendChild(h2);
-      detailEl.appendChild(meta);
+      container.appendChild(h2);
+      container.appendChild(meta);
 
       const transcriptHeading = document.createElement('h3');
       transcriptHeading.textContent = 'Transcript';
-      detailEl.appendChild(transcriptHeading);
+      container.appendChild(transcriptHeading);
 
       if (!d.messages.length) {
         const p = document.createElement('p');
         p.className = 'empty';
         p.textContent = 'No messages recorded for this chat.';
-        detailEl.appendChild(p);
+        container.appendChild(p);
       } else {
         const transcript = document.createElement('div');
         transcript.className = 'transcript';
@@ -219,18 +218,18 @@ export class ChatHistoryPanel {
           div.appendChild(text);
           transcript.appendChild(div);
         }
-        detailEl.appendChild(transcript);
+        container.appendChild(transcript);
       }
 
       const reflectionsHeading = document.createElement('h3');
       reflectionsHeading.textContent = 'AI reflections';
-      detailEl.appendChild(reflectionsHeading);
+      container.appendChild(reflectionsHeading);
 
       if (!d.reflections.length) {
         const p = document.createElement('p');
         p.className = 'empty';
         p.textContent = 'No reflections recorded for this chat.';
-        detailEl.appendChild(p);
+        container.appendChild(p);
       } else {
         for (const r of d.reflections) {
           const div = document.createElement('div');
@@ -251,15 +250,39 @@ export class ChatHistoryPanel {
             }
             div.appendChild(ul);
           }
-          detailEl.appendChild(div);
+          container.appendChild(div);
         }
       }
-      detailEl.style.display = 'block';
-      detailEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      return container;
     }
 
+    let openDetailRow = null;
+
     document.querySelectorAll('.chat-row').forEach((row) => {
-      row.addEventListener('click', () => renderDetail(row.dataset.chatId));
+      row.addEventListener('click', () => {
+        if (openDetailRow && openDetailRow.previousElementSibling === row) {
+          openDetailRow.remove();
+          openDetailRow = null;
+          return;
+        }
+        if (openDetailRow) {
+          openDetailRow.remove();
+          openDetailRow = null;
+        }
+        const container = renderDetail(row.dataset.chatId);
+        if (!container) {
+          return;
+        }
+        const tr = document.createElement('tr');
+        tr.className = 'detail-row';
+        const td = document.createElement('td');
+        td.colSpan = 11;
+        td.appendChild(container);
+        tr.appendChild(td);
+        row.insertAdjacentElement('afterend', tr);
+        openDetailRow = tr;
+        tr.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
     });
 
     document.getElementById('reset').addEventListener('click', () => {
