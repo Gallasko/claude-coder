@@ -5,7 +5,7 @@ export interface MessageRecord {
   id: number;
   chatId: number;
   projectPath: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'tool' | 'thinking';
   text: string;
   createdAt: number;
 }

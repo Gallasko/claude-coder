@@ -10,7 +10,7 @@ interface DetailData {
   model: string;
   createdAt: number;
   reflections: { summary: string; highlights: string[]; createdAt: number }[];
-  messages: { role: 'user' | 'assistant'; text: string; createdAt: number }[];
+  messages: { role: 'user' | 'assistant' | 'tool' | 'thinking'; text: string; createdAt: number }[];
 }
 
 /** Singleton webview panel listing every recorded chat (cost, length, duration, summary). */
@@ -151,6 +151,12 @@ export class ChatHistoryPanel {
     .detail .msg .when { opacity: 0.6; font-size: 10px; margin-bottom: 2px; }
     .detail .msg.user { align-self: flex-end; background: var(--vscode-list-inactiveSelectionBackground); }
     .detail .msg.assistant { align-self: flex-start; background: var(--vscode-editor-inactiveSelectionBackground, var(--vscode-list-hoverBackground)); }
+    .detail .msg.tool { align-self: stretch; font-family: var(--vscode-editor-font-family, monospace); opacity: 0.8; background: var(--vscode-textBlockQuote-background); }
+    .detail .msg.thinking { align-self: stretch; font-style: italic; opacity: 0.75; }
+    .detail .transcript.hide-tool .msg.tool { display: none; }
+    .detail .transcript.hide-thinking .msg.thinking { display: none; }
+    .transcript-controls { display: flex; gap: 16px; font-size: 11px; opacity: 0.8; margin-bottom: 6px; }
+    .transcript-controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -204,14 +210,37 @@ export class ChatHistoryPanel {
         p.textContent = 'No messages recorded for this chat.';
         container.appendChild(p);
       } else {
+        const controls = document.createElement('div');
+        controls.className = 'transcript-controls';
+        const toolLabel = document.createElement('label');
+        const toolCheckbox = document.createElement('input');
+        toolCheckbox.type = 'checkbox';
+        toolLabel.appendChild(toolCheckbox);
+        toolLabel.append(' Show commands');
+        const thinkLabel = document.createElement('label');
+        const thinkCheckbox = document.createElement('input');
+        thinkCheckbox.type = 'checkbox';
+        thinkLabel.appendChild(thinkCheckbox);
+        thinkLabel.append(' Show thoughts');
+        controls.appendChild(toolLabel);
+        controls.appendChild(thinkLabel);
+        container.appendChild(controls);
+
         const transcript = document.createElement('div');
-        transcript.className = 'transcript';
+        transcript.className = 'transcript hide-tool hide-thinking';
+        toolCheckbox.addEventListener('change', () => {
+          transcript.classList.toggle('hide-tool', !toolCheckbox.checked);
+        });
+        thinkCheckbox.addEventListener('change', () => {
+          transcript.classList.toggle('hide-thinking', !thinkCheckbox.checked);
+        });
         for (const m of d.messages) {
           const div = document.createElement('div');
           div.className = 'msg ' + m.role;
           const when = document.createElement('div');
           when.className = 'when';
-          when.textContent = (m.role === 'user' ? 'You' : 'Claude') + ' · ' + fmt(m.createdAt);
+          const label = m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Claude' : m.role === 'tool' ? 'Command' : 'Thought';
+          when.textContent = label + ' · ' + fmt(m.createdAt);
           const text = document.createElement('div');
           text.textContent = m.text;
           div.appendChild(when);

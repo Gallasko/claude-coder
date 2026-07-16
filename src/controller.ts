@@ -812,13 +812,22 @@ export class Controller {
       const maxTokens = this.config().get<number>('maxTokens') ?? 32000;
 
       let assistantCharsThisTurn = 0;
+      let thinkingBuf = '';
       const result = await runTurn(client, session, content, toolCtx, maxTokens, {
         onText: (delta) => {
           assistantCharsThisTurn += delta.length;
           this.post({ type: 'delta', text: delta });
         },
-        onToolUse: (name, input) =>
-          this.post({ type: 'toolUse', name, detail: previewInput(name, input) }),
+        onToolUse: (name, input) => {
+          const detail = previewInput(name, input);
+          this.messageStore?.add({
+            chatId: session.id,
+            projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+            role: 'tool',
+            text: `${name} ${detail}`,
+          });
+          this.post({ type: 'toolUse', name, detail });
+        },
         onToolResult: (name, ok, preview) => this.post({ type: 'toolResult', name, ok, preview }),
         onRequestDone: (usage, servedModel) => {
           this.log.appendLine(
@@ -854,7 +863,10 @@ export class Controller {
         },
         onNotice: (msg) => this.post({ type: 'notice', text: msg }),
         onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
-        onThinking: (delta) => this.post({ type: 'thinking', text: delta }),
+        onThinking: (delta) => {
+          thinkingBuf += delta;
+          this.post({ type: 'thinking', text: delta });
+        },
       }, this.abort.signal, minimize);
 
       this.chatHistoryStore?.addUsage(session.id, {
@@ -872,6 +884,14 @@ export class Controller {
           projectPath: this.tryWorkspaceRoot() ?? 'unknown',
           role: 'assistant',
           text: result.finalText,
+        });
+      }
+      if (thinkingBuf.trim()) {
+        this.messageStore?.add({
+          chatId: session.id,
+          projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+          role: 'thinking',
+          text: thinkingBuf,
         });
       }
       this.post({ type: 'turnDone', stopReason: result.stopReason });
@@ -924,6 +944,7 @@ export class Controller {
     memory: MemoryStore,
     client: Anthropic | undefined
   ): Promise<SubscriptionTurnResult> {
+    let thinkingBuf = '';
     const result = await runSubscriptionTurn({
       prompt,
       workspaceRoot: this.workspaceRoot(),
@@ -936,10 +957,21 @@ export class Controller {
       requestPermission: (req) => this.requestPermission(req),
       requestQuestion: (questions) => this.requestQuestion(questions),
       onText: (delta) => this.post({ type: 'delta', text: delta }),
-      onToolUse: (name, detail) => this.post({ type: 'toolUse', name, detail }),
+      onToolUse: (name, detail) => {
+        this.messageStore?.add({
+          chatId: session.id,
+          projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+          role: 'tool',
+          text: `${name} ${detail}`,
+        });
+        this.post({ type: 'toolUse', name, detail });
+      },
       onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
       onNotice: (msg) => this.post({ type: 'notice', text: msg }),
-      onThinking: (delta) => this.post({ type: 'thinking', text: delta }),
+      onThinking: (delta) => {
+        thinkingBuf += delta;
+        this.post({ type: 'thinking', text: delta });
+      },
     });
     session.sdkSessionId = result.sdkSessionId ?? session.sdkSessionId;
     if (result.finalText) {
@@ -949,6 +981,14 @@ export class Controller {
         projectPath: this.tryWorkspaceRoot() ?? 'unknown',
         role: 'assistant',
         text: result.finalText,
+      });
+    }
+    if (thinkingBuf.trim()) {
+      this.messageStore?.add({
+        chatId: session.id,
+        projectPath: this.tryWorkspaceRoot() ?? 'unknown',
+        role: 'thinking',
+        text: thinkingBuf,
       });
     }
     this.subTotals.inputTokens += result.usage.inputTokens;
