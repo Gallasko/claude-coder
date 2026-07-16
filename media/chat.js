@@ -109,6 +109,7 @@ const memoryBannerEl = document.getElementById('memory-banner');
     { name: 'memory', desc: 'Show project memory (notes, changes, file summaries)' },
     { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
     { name: 'commit', desc: 'Commit current changes (/commit <message>)' },
+    { name: 'deferred', desc: 'List or cancel deferred tasks (/deferred cancel <id>)' },
     { name: 'help', desc: 'List available commands' },
   ];
 
@@ -199,6 +200,9 @@ const memoryBannerEl = document.getElementById('memory-banner');
         break;
       case 'commit':
         vscode.postMessage({ type: 'commit', text: arg || '' });
+        break;
+      case 'deferred':
+        vscode.postMessage({ type: 'deferred', text: arg || '' });
         break;
       case 'help':
         addMsg('notice', 'Available commands:\n' + SLASH_COMMANDS.map((c) => '/' + c.name + ' — ' + c.desc).join('\n'));

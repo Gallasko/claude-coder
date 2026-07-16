@@ -40,6 +40,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // stale memories get flagged instead of silently going out of sync.
   const taskMemoryPoll = setInterval(() => void controller.pollTaskMemoryFreshness(), 5 * 60 * 1000);
   context.subscriptions.push({ dispose: () => clearInterval(taskMemoryPoll) });
+
+  // Deferred tasks (see deferredTaskStore.ts) — prompts parked until the
+  // subscription plan limit resets. Check once on activation (catch up after
+  // a restart) and then every minute; interval-based so sleep/hibernate and
+  // reloads are all covered by one mechanism.
+  void controller.checkDueDeferredTasks();
+  const deferredPoll = setInterval(() => void controller.checkDueDeferredTasks(), 60 * 1000);
+  context.subscriptions.push({ dispose: () => clearInterval(deferredPoll) });
 }
 
 export async function deactivate(): Promise<void> {

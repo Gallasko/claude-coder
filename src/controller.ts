@@ -40,6 +40,7 @@ import { ProjectStore } from './agent/projectStore';
 import { SummaryStore, SummaryRecord } from './agent/summaryStore';
 import { MessageStore } from './agent/messageStore';
 import { TaskMemory, TaskMemoryFile, TaskMemoryStore } from './agent/taskMemoryStore';
+import { DeferredTaskStore } from './agent/deferredTaskStore';
 import {
   summarizeSession,
   findRelevantChats,
@@ -119,6 +120,8 @@ export class Controller {
   private readonly messageStoreReady: Promise<MessageStore>;
   /** Persistent, per-workspace task-level memories (summary + touched files) — see taskMemoryStore.ts. */
   private taskMemory: TaskMemoryStore | undefined;
+  /** Persistent, per-workspace tasks deferred until the plan limit resets — see deferredTaskStore.ts. */
+  private deferredTasks: DeferredTaskStore | undefined;
 
   constructor(private context: vscode.ExtensionContext) {
     this.sessions = new SessionManager(this.ladder()[0]);
@@ -686,14 +689,32 @@ export class Controller {
         const canFallbackToCredits = allowsFallback(preference) && !!client;
         try {
           const result = await this.runSubscription(session, content, minimize, memory, client);
-          if (result.isError && isUsageLimitOrModelError(result.errorText) && canFallbackToCredits) {
-            // Subscription usage limit hit or the model isn't available on
-            // this plan — fall back to API credits for this turn automatically,
-            // no user confirmation needed.
-            this.log.appendLine(`[sub usage-limit/model fallback] ${result.errorText}`);
+          if (result.isError && isUsageLimitError(result.errorText)) {
+            // Plan usage limit hit — ask instead of silently spending credits:
+            // escalate now, defer until the plan resets, or drop the prompt.
+            this.log.appendLine(`[sub usage-limit] ${result.errorText}`);
+            const action = await this.offerLimitChoice(session, text, result, canFallbackToCredits);
+            if (action === 'credits') {
+              this.post({ type: 'notice', text: 'Continuing this turn on API credits.' });
+              session.backend = 'credits';
+              // falls through to the credits backend below
+            } else {
+              this.post({ type: 'turnDone', stopReason: action === 'cancel' ? 'cancelled' : 'end_turn' });
+              this.postSessionInfo();
+              if (action === 'escalate-plan') {
+                // escalate() re-enters handleUserMessage — let this turn's
+                // finally release the busy flag first.
+                setTimeout(() => void this.escalate(), 0);
+              }
+              return;
+            }
+          } else if (result.isError && isUsageLimitOrModelError(result.errorText) && canFallbackToCredits) {
+            // Model isn't available on this plan — fall back to API credits
+            // for this turn automatically, no user confirmation needed.
+            this.log.appendLine(`[sub model fallback] ${result.errorText}`);
             this.post({
               type: 'notice',
-              text: `Subscription limit reached (${result.errorText ?? 'unknown'}) — using API credits for this turn.`,
+              text: `Subscription can't run this model (${result.errorText ?? 'unknown'}) — using API credits for this turn.`,
             });
             session.backend = 'credits';
           } else {
@@ -1052,6 +1073,123 @@ export class Controller {
         this.warnedRateLimitWindows.delete(w.label);
       }
     }
+  }
+
+  /**
+   * Plan-limit hit mid-turn: ask escalate / wait-for-reset / cancel via the
+   * standard question card. Persists a DeferredTask when the user waits, so
+   * the prompt auto-resumes once the plan resets (see checkDueDeferredTasks).
+   */
+  private async offerLimitChoice(
+    session: Session,
+    originalText: string,
+    result: SubscriptionTurnResult,
+    canFallbackToCredits: boolean
+  ): Promise<'credits' | 'escalate-plan' | 'deferred' | 'cancel'> {
+    const resetsAt = await this.soonestPlanReset(result);
+    const currentSubModel = session.subModel ?? this.subscriptionModel();
+    const options: { label: string; description: string }[] = [];
+    if (canFallbackToCredits) {
+      options.push({
+        label: 'Escalate to credits',
+        description: `Continue this turn on ${displayName(this.ladder()[0])} using API credits.`,
+      });
+    } else if (currentSubModel !== 'opus') {
+      options.push({
+        label: 'Escalate on plan',
+        description: 'Restart the task on opus on your subscription plan (no credits spent).',
+      });
+    }
+    if (resetsAt) {
+      options.push({
+        label: 'Wait for plan reset',
+        description: `Defer this prompt and resume it automatically when the plan resets (${new Date(resetsAt).toLocaleString()}).`,
+      });
+    }
+    options.push({ label: 'Cancel', description: 'Drop this prompt — nothing runs and nothing is billed.' });
+    const question = `Subscription limit reached (${result.errorText ?? 'usage limit'}). How should this task continue?`;
+    const answers = await this.requestQuestion([
+      { question, header: 'Plan limit', options, multiSelect: false },
+    ]);
+    const answer = answers[question];
+    if (answer === 'Escalate to credits') {
+      return 'credits';
+    }
+    if (answer === 'Escalate on plan') {
+      return 'escalate-plan';
+    }
+    if (answer === 'Wait for plan reset' && resetsAt) {
+      const store = await this.ensureDeferredTasks();
+      const task = store.add(originalText, resetsAt);
+      this.post({
+        type: 'notice',
+        text: `Task deferred (#${task.id}) — it resumes automatically after the plan resets (${new Date(resetsAt).toLocaleString()}). Use /deferred to list or cancel.`,
+      });
+      return 'deferred';
+    }
+    return 'cancel';
+  }
+
+  /** Soonest future plan-reset time: the turn's rate-limit windows first, a direct usage fetch as fallback. */
+  private async soonestPlanReset(result: SubscriptionTurnResult): Promise<string | undefined> {
+    const now = Date.now();
+    const future = (windows: { resetsAt: string | undefined }[]): string[] =>
+      windows.map((w) => w.resetsAt).filter((r): r is string => !!r && Date.parse(r) > now);
+    let candidates = future(result.rateLimit?.windows ?? []);
+    if (candidates.length === 0) {
+      try {
+        candidates = future((await fetchSubscriptionRateLimit()).windows);
+      } catch (e: any) {
+        this.log.appendLine(`[plan reset fetch error] ${e?.message ?? e}`);
+      }
+    }
+    return candidates.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  }
+
+  /**
+   * Resumes the oldest deferred task whose plan-reset time has passed — one
+   * per call; the 60s poll in extension.ts picks up the next. No-op while a
+   * turn is running.
+   */
+  async checkDueDeferredTasks(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    const store = await this.ensureDeferredTasks();
+    const task = store.due(Date.now())[0];
+    if (!task) {
+      return;
+    }
+    store.markResumed(task.id);
+    this.post({ type: 'notice', text: `Plan reset reached — resuming deferred task #${task.id}.` });
+    await this.handleUserMessage(task.prompt);
+  }
+
+  /** `/deferred` — list pending deferred tasks, or `/deferred cancel <id>` to drop one. */
+  async handleDeferredCommand(arg: string): Promise<void> {
+    const store = await this.ensureDeferredTasks();
+    const cancelMatch = /^cancel\s+(\d+)$/.exec(arg.trim());
+    if (cancelMatch) {
+      const id = Number(cancelMatch[1]);
+      this.post({
+        type: 'notice',
+        text: store.cancel(id) ? `Deferred task #${id} cancelled.` : `No pending deferred task #${id}.`,
+      });
+      return;
+    }
+    const pending = store.pending();
+    if (pending.length === 0) {
+      this.post({ type: 'notice', text: 'No deferred tasks. When a plan limit defers a prompt it shows up here.' });
+      return;
+    }
+    const lines = pending.map(
+      (t) =>
+        `#${t.id} — resumes ${new Date(t.resetsAt).toLocaleString()} — ${t.prompt.slice(0, 80)}${t.prompt.length > 80 ? '…' : ''}`
+    );
+    this.post({
+      type: 'notice',
+      text: `Deferred tasks:\n${lines.join('\n')}\nUse /deferred cancel <id> to cancel one.`,
+    });
   }
 
   /** Chat card asking whether to restart the task on the credits tier. */
@@ -1666,6 +1804,15 @@ export class Controller {
     return this.taskMemory;
   }
 
+  /** Lazily opens (or creates) the per-workspace deferred-task file — see deferredTaskStore.ts. */
+  private async ensureDeferredTasks(): Promise<DeferredTaskStore> {
+    if (!this.deferredTasks) {
+      const dir = this.context.storageUri?.fsPath ?? path.join(this.workspaceRoot(), '.claudeCoder');
+      this.deferredTasks = await DeferredTaskStore.load(path.join(dir, 'deferred-tasks.json'));
+    }
+    return this.deferredTasks;
+  }
+
   private async statTaskMemoryFiles(root: string, paths: string[]): Promise<Record<string, TaskMemoryFile>> {
     const entries = await Promise.all(
       paths.map(async (p): Promise<[string, TaskMemoryFile] | undefined> => {
@@ -2161,6 +2308,14 @@ export class Controller {
  */
 function withTransientRetry<T>(op: () => Promise<T>): Promise<T> {
   return withRetry(op);
+}
+
+/** Usage/rate-limit failures only — the cases where waiting for the plan reset makes sense. */
+function isUsageLimitError(errorText: string | undefined): boolean {
+  if (!errorText) {
+    return false;
+  }
+  return /usage limit|rate limit|rate_limit|429|quota|too many requests/.test(errorText.toLowerCase());
 }
 
 function isUsageLimitOrModelError(errorText: string | undefined): boolean {
