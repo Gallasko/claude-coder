@@ -2,7 +2,7 @@
   "name": "claude-coder",
   "displayName": "Claude Coder",
   "description": "Cost-aware Claude coding agent: auto task sessions, prompt caching, model escalation",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "publisher": "corse",
   "private": true,
   "engines": {
@@ -220,6 +220,8 @@
     "vscode:prepublish": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "package": "vsce package",
     "bump": "bash scripts/bump-and-reinstall.sh",
     "bump:win": "powershell -ExecutionPolicy Bypass -File scripts/bump-and-reinstall.ps1"
@@ -232,8 +234,10 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.24.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
   }
 }

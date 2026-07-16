@@ -793,7 +793,7 @@ export async function runHaikuTask(p: HaikuTaskParams): Promise<HaikuTaskResult>
  * Keys are shared with the credits backend, so "yes, always" answers apply
  * to both.
  */
-function mapToolToPermission(
+export function mapToolToPermission(
   toolName: string,
   input: Record<string, unknown>,
   workspaceRoot: string

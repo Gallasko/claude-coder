@@ -98,20 +98,7 @@ const memoryBannerEl = document.getElementById('memory-banner');
     thinkingBodyEl = null;
   }
 
-  const SLASH_COMMANDS = [
-    { name: 'setup', desc: 'Set up subscription or API key' },
-    { name: 'new', desc: 'Start a new task (reset session)' },
-    { name: 'escalate', desc: 'Restart task on the next bigger model' },
-    { name: 'costs', desc: 'Show session cost breakdown' },
-    { name: 'usage', desc: 'Show usage history & billing tracker' },
-    { name: 'plan-usage', desc: 'Show Claude subscription plan rate limits (5-hour & weekly)' },
-    { name: 'history', desc: 'Show all chats & sessions' },
-    { name: 'memory', desc: 'Show project memory (notes, changes, file summaries)' },
-    { name: 'reset-permissions', desc: 'Clear "always allow" permissions' },
-    { name: 'commit', desc: 'Commit current changes (/commit <message>)' },
-    { name: 'deferred', desc: 'List or cancel deferred tasks (/deferred cancel <id>)' },
-    { name: 'help', desc: 'List available commands' },
-  ];
+  const { SLASH_COMMANDS, matchCommandPrefix, commandToMessage } = window.SlashCommands;
 
   let commandMatches = [];
   let activeCommandIndex = 0;
@@ -150,13 +137,12 @@ const memoryBannerEl = document.getElementById('memory-banner');
   }
 
   function updateCommandMenu() {
-    const match = /^\/([\w-]*)$/.exec(inputEl.value);
-    if (!match) {
+    const matches = matchCommandPrefix(inputEl.value);
+    if (!matches) {
       closeCommandMenu();
       return;
     }
-    const typed = match[1].toLowerCase();
-    commandMatches = SLASH_COMMANDS.filter((c) => c.name.startsWith(typed));
+    commandMatches = matches;
     activeCommandIndex = 0;
     renderCommandMenu();
   }
@@ -169,47 +155,19 @@ const memoryBannerEl = document.getElementById('memory-banner');
 
   function runSlashCommand(name, arg) {
     inputEl.value = '';
-    switch (name) {
-      case 'setup':
-        vscode.postMessage({ type: 'runSetup' });
-        break;
-      case 'new':
-        vscode.postMessage({ type: 'newTask' });
-        break;
-      case 'escalate':
-        setBusy(true);
-        vscode.postMessage({ type: 'escalate' });
-        break;
-      case 'costs':
-        vscode.postMessage({ type: 'showCosts' });
-        break;
-      case 'usage':
-        vscode.postMessage({ type: 'showUsageHistory' });
-        break;
-      case 'plan-usage':
-        vscode.postMessage({ type: 'showSubscriptionUsage' });
-        break;
-      case 'history':
-        vscode.postMessage({ type: 'showChatHistory' });
-        break;
-      case 'memory':
-        vscode.postMessage({ type: 'showMemory' });
-        break;
-      case 'reset-permissions':
-        vscode.postMessage({ type: 'resetPermissions' });
-        break;
-      case 'commit':
-        vscode.postMessage({ type: 'commit', text: arg || '' });
-        break;
-      case 'deferred':
-        vscode.postMessage({ type: 'deferred', text: arg || '' });
-        break;
-      case 'help':
-        addMsg('notice', 'Available commands:\n' + SLASH_COMMANDS.map((c) => '/' + c.name + ' — ' + c.desc).join('\n'));
-        break;
-      default:
-        addMsg('notice', 'Unknown command: /' + name);
+    if (name === 'help') {
+      addMsg('notice', 'Available commands:\n' + SLASH_COMMANDS.map((c) => '/' + c.name + ' — ' + c.desc).join('\n'));
+      return;
     }
+    const message = commandToMessage(name, arg);
+    if (!message) {
+      addMsg('notice', 'Unknown command: /' + name);
+      return;
+    }
+    if (name === 'escalate') {
+      setBusy(true);
+    }
+    vscode.postMessage(message);
   }
 
   function scrollDown() {
@@ -235,14 +193,11 @@ const memoryBannerEl = document.getElementById('memory-banner');
     if (!text) {
       return;
     }
-    const cmdMatch = /^\/([\w-]+)(?:\s+([\s\S]*))?$/.exec(text);
-    if (cmdMatch) {
-      const known = SLASH_COMMANDS.find((c) => c.name === cmdMatch[1].toLowerCase());
-      if (known) {
-        closeCommandMenu();
-        runSlashCommand(known.name, cmdMatch[2]);
-        return;
-      }
+    const parsed = window.SlashCommands.parseSlashCommand(text);
+    if (parsed) {
+      closeCommandMenu();
+      runSlashCommand(parsed.name, parsed.arg);
+      return;
     }
     closeCommandMenu();
     addMsg('user', text);

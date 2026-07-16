@@ -500,7 +500,17 @@ export class Controller {
     const choicePromise = new Promise<PermissionChoice>((resolve) => {
       this.permissionResolvers.set(id, resolve);
     });
-    const planFile = await withTransientRetry(() => this.openPlanInEditor(plan));
+    let planFile: { uri: vscode.Uri; fsPath: string };
+    try {
+      planFile = await withTransientRetry(() => this.openPlanInEditor(plan));
+    } catch (e) {
+      // Never leave a resolver registered for a card that was never shown —
+      // the caller (planIfNeeded) already treats this failure as "proceed
+      // without approval," so failing to clean up here would leak this id
+      // in permissionResolvers forever.
+      this.permissionResolvers.delete(id);
+      throw e;
+    }
     this.post({ type: 'permission', id, kind: 'plan', title: 'Plan ready — proceed with implementation?', detail: plan });
     const choice = await choicePromise;
     this.permissionResolvers.delete(id);

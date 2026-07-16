@@ -78,6 +78,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private html(webview: vscode.Webview): string {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.js'));
     const markdownUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown.js'));
+    const slashCommandsUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'slashCommands.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'chat.css'));
     const nonce = Math.random().toString(36).slice(2);
     return `<!DOCTYPE html>
@@ -110,6 +111,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
   <script nonce="${nonce}" src="${markdownUri}"></script>
+  <script nonce="${nonce}" src="${slashCommandsUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
