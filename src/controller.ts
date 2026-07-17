@@ -580,7 +580,7 @@ export class Controller {
       },
     ]);
     if (answers[question] === 'Commit') {
-      await this.commitChanges('', 'claude');
+      await this.commitChanges('', 'user');
     }
   }
 
