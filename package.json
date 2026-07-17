@@ -77,8 +77,22 @@
       {
         "command": "claudeCoder.resetPermissions",
         "title": "Claude Coder: Reset \"Always Allow\" Permissions"
+      },
+      {
+        "command": "claudeCoder.openInWindow",
+        "title": "Claude Coder: Open in Editor / Detach",
+        "icon": "$(link-external)"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeCoder.openInWindow",
+          "when": "view == claudeCoder.chat",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Claude Coder",
       "properties": {

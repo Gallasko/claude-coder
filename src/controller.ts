@@ -87,7 +87,7 @@ export class Controller {
   private subValueUsd = 0;
   private warnedRateLimitWindows = new Set<string>();
   private abort: AbortController | undefined;
-  private ui: UiSink | undefined;
+  private uis = new Set<UiSink>();
   private statusBar: vscode.StatusBarItem;
   private log: vscode.OutputChannel;
   private busy = false;
@@ -235,9 +235,16 @@ export class Controller {
   }
 
   attachUi(ui: UiSink): void {
-    this.ui = ui;
+    const isFirst = this.uis.size === 0;
+    this.uis.add(ui);
     this.postSessionInfo();
-    void this.offerSetupIfNeeded();
+    if (isFirst) {
+      void this.offerSetupIfNeeded();
+    }
+  }
+
+  detachUi(ui: UiSink): void {
+    this.uis.delete(ui);
   }
 
   private config() {
@@ -333,7 +340,9 @@ export class Controller {
   }
 
   private post(message: Record<string, unknown>): void {
-    this.ui?.post(message);
+    for (const ui of this.uis) {
+      ui.post(message);
+    }
   }
 
   // ---------- setup & API key ----------

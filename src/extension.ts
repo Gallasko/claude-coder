@@ -32,7 +32,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('claudeCoder.showChatHistory', () => controller.showChatHistory()),
-    vscode.commands.registerCommand('claudeCoder.resetPermissions', () => controller.resetPermissions())
+    vscode.commands.registerCommand('claudeCoder.resetPermissions', () => controller.resetPermissions()),
+    vscode.commands.registerCommand('claudeCoder.openInWindow', () => provider.openInWindow())
   );
 
   // Background freshness check for task memories (see taskMemoryStore.ts) —

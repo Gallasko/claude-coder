@@ -4,6 +4,7 @@ import { Controller } from '../controller';
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'claudeCoder.chat';
   private view: vscode.WebviewView | undefined;
+  private panel: vscode.WebviewPanel | undefined;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -12,67 +13,101 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
-    };
+    webviewView.webview.options = this.webviewOptions();
     webviewView.webview.html = this.html(webviewView.webview);
-
-    webviewView.webview.onDidReceiveMessage(async (msg) => {
-      switch (msg.type) {
-        case 'send':
-          await this.controller.handleUserMessage(String(msg.text ?? ''));
-          break;
-        case 'cancel':
-          this.controller.cancel();
-          break;
-        case 'newTask':
-          this.controller.newTask();
-          break;
-        case 'escalate':
-          await this.controller.escalate();
-          break;
-        case 'permissionResponse':
-          this.controller.handlePermissionResponse(msg.id, String(msg.choice));
-          break;
-        case 'askQuestionResponse':
-          this.controller.handleAskQuestionResponse(msg.id, msg.answers ?? {});
-          break;
-        case 'showCosts':
-          this.controller.showCosts();
-          break;
-        case 'showUsageHistory':
-          await this.controller.showUsageHistory();
-          break;
-        case 'showSubscriptionUsage':
-          await this.controller.showSubscriptionUsage();
-          break;
-        case 'showChatHistory':
-          await this.controller.showChatHistory();
-          break;
-        case 'showMemory':
-          await this.controller.showMemory();
-          break;
-        case 'resetPermissions':
-          await this.controller.resetPermissions();
-          break;
-        case 'runSetup':
-          await this.controller.runSetup();
-          break;
-        case 'commit':
-          await this.controller.commitChanges(String(msg.text ?? ''));
-          break;
-        case 'deferred':
-          await this.controller.handleDeferredCommand(String(msg.text ?? ''));
-          break;
-      }
-    });
+    webviewView.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
 
     this.controller.attachUi({
       post: (message) => {
         this.view?.webview.postMessage(message);
       },
     });
+  }
+
+  openInWindow(): void {
+    if (this.panel) {
+      this.panel.reveal();
+      return;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      'claudeCoder.chatPanel',
+      'Claude Coder',
+      vscode.ViewColumn.Active,
+      { ...this.webviewOptions(), retainContextWhenHidden: true }
+    );
+    this.panel = panel;
+    panel.webview.html = this.html(panel.webview);
+    panel.webview.onDidReceiveMessage((msg) => this.handleMessage(msg));
+
+    const ui = {
+      post: (message: Record<string, unknown>) => {
+        panel.webview.postMessage(message);
+      },
+    };
+    this.controller.attachUi(ui);
+
+    panel.onDidDispose(() => {
+      this.controller.detachUi(ui);
+      this.panel = undefined;
+    });
+  }
+
+  private webviewOptions(): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
+    };
+  }
+
+  private async handleMessage(msg: any): Promise<void> {
+    switch (msg.type) {
+      case 'send':
+        await this.controller.handleUserMessage(String(msg.text ?? ''));
+        break;
+      case 'cancel':
+        this.controller.cancel();
+        break;
+      case 'newTask':
+        this.controller.newTask();
+        break;
+      case 'escalate':
+        await this.controller.escalate();
+        break;
+      case 'permissionResponse':
+        this.controller.handlePermissionResponse(msg.id, String(msg.choice));
+        break;
+      case 'askQuestionResponse':
+        this.controller.handleAskQuestionResponse(msg.id, msg.answers ?? {});
+        break;
+      case 'showCosts':
+        this.controller.showCosts();
+        break;
+      case 'showUsageHistory':
+        await this.controller.showUsageHistory();
+        break;
+      case 'showSubscriptionUsage':
+        await this.controller.showSubscriptionUsage();
+        break;
+      case 'showChatHistory':
+        await this.controller.showChatHistory();
+        break;
+      case 'showMemory':
+        await this.controller.showMemory();
+        break;
+      case 'resetPermissions':
+        await this.controller.resetPermissions();
+        break;
+      case 'runSetup':
+        await this.controller.runSetup();
+        break;
+      case 'commit':
+        await this.controller.commitChanges(String(msg.text ?? ''));
+        break;
+      case 'deferred':
+        await this.controller.handleDeferredCommand(String(msg.text ?? ''));
+        break;
+    }
   }
 
   private html(webview: vscode.Webview): string {

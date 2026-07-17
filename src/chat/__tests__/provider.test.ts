@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ChatViewProvider } from '../provider';
-import { Uri } from '../../test/mocks/vscode';
+import { Uri, window } from '../../test/mocks/vscode';
 
 function makeFakeController() {
   return {
@@ -20,6 +20,7 @@ function makeFakeController() {
     commitChanges: vi.fn(async () => undefined),
     handleDeferredCommand: vi.fn(async () => undefined),
     attachUi: vi.fn(),
+    detachUi: vi.fn(),
   };
 }
 
@@ -93,5 +94,50 @@ describe('ChatViewProvider message dispatch', () => {
         expect(fn).not.toHaveBeenCalled();
       }
     }
+  });
+});
+
+describe('ChatViewProvider.openInWindow', () => {
+  let controller: ReturnType<typeof makeFakeController>;
+  let provider: ChatViewProvider;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    controller = makeFakeController();
+    provider = new ChatViewProvider(Uri.file('/ext') as any, controller as any);
+  });
+
+  it('creates a webview panel and registers a second UI sink', () => {
+    provider.openInWindow();
+
+    expect(window.createWebviewPanel).toHaveBeenCalledTimes(1);
+    expect(controller.attachUi).toHaveBeenCalledTimes(1);
+    const panel = (window.createWebviewPanel as any).mock.results[0].value;
+    const ui = controller.attachUi.mock.calls[0][0];
+    ui.post({ type: 'notice', text: 'hi' });
+    expect(panel.webview.postMessage).toHaveBeenCalledWith({ type: 'notice', text: 'hi' });
+  });
+
+  it('reveals the existing panel instead of creating a second one', () => {
+    provider.openInWindow();
+    const panel = (window.createWebviewPanel as any).mock.results[0].value;
+
+    provider.openInWindow();
+
+    expect(window.createWebviewPanel).toHaveBeenCalledTimes(1);
+    expect(panel.reveal).toHaveBeenCalledTimes(1);
+  });
+
+  it('detaches the UI sink and clears the panel ref on dispose', () => {
+    provider.openInWindow();
+    const panel = (window.createWebviewPanel as any).mock.results[0].value;
+    const ui = controller.attachUi.mock.calls[0][0];
+    const onDidDispose = (panel.onDidDispose as any).mock.calls[0][0];
+
+    onDidDispose();
+    expect(controller.detachUi).toHaveBeenCalledWith(ui);
+
+    provider.openInWindow();
+    expect(window.createWebviewPanel).toHaveBeenCalledTimes(2);
   });
 });
