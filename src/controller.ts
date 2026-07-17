@@ -537,6 +537,41 @@ export class Controller {
     vscode.window.showInformationMessage('Claude Coder: "always allow" permissions cleared for the current chat.');
   }
 
+  /** Offers a commit prompt after a successful turn if the workspace has uncommitted changes. */
+  private async maybePromptCommit(): Promise<void> {
+    const root = this.tryWorkspaceRoot();
+    if (!root) {
+      return;
+    }
+    if (this.abort?.signal.aborted) {
+      return;
+    }
+    try {
+      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root });
+    } catch {
+      return;
+    }
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], { cwd: root });
+    if (!stdout.trim()) {
+      return;
+    }
+    const question = 'Commit these changes?';
+    const answers = await this.requestQuestion([
+      {
+        question,
+        header: 'Commit',
+        options: [
+          { label: 'Commit', description: 'Stage all and commit with an auto-generated message' },
+          { label: 'Not now', description: 'Leave changes uncommitted' },
+        ],
+        multiSelect: false,
+      },
+    ]);
+    if (answers[question] === 'Commit') {
+      await this.commitChanges('');
+    }
+  }
+
   async commitChanges(message: string): Promise<void> {
     const root = this.tryWorkspaceRoot();
     if (!root) {
@@ -761,6 +796,9 @@ export class Controller {
                 void this.offerEscalation(`The subscription attempt failed (${result.errorText ?? 'unknown'}). ${escalateDesc}`);
               }
             }
+            if (!result.isError) {
+              await this.maybePromptCommit();
+            }
             return;
           }
         } catch (e: any) {
@@ -804,6 +842,8 @@ export class Controller {
                   type: 'notice',
                   text: `Subscription run ended with an error (${result.errorText ?? 'unknown'}).`,
                 });
+              } else {
+                await this.maybePromptCommit();
               }
               return;
             } catch (e2: any) {
@@ -937,6 +977,7 @@ export class Controller {
       this.post({ type: 'turnDone', stopReason: result.stopReason });
       this.postSessionInfo();
       void this.maybeUpdateTaskMemory(session, client);
+      await this.maybePromptCommit();
       if (this.autoCompact()) {
         await this.compactIfNeeded(client, session);
       } else {
