@@ -1985,7 +1985,48 @@ export class Controller {
       // summarizeFileForMemory) — available even for subscription-only users.
       summarizeFile: (path, content, detailed) => this.summarizeFileForMemory(client, path, content, detailed),
       askQuestion: (questions) => this.requestQuestion(questions),
+      searchMemory: (task) => this.searchProjectMemories(client, task),
     };
+  }
+
+  /**
+   * Backs the search_memory tool: asks Haiku (subscription-first, credits
+   * fallback — see findRelevantMemories) which of this project's task
+   * memories relate to the given task, and formats a short summary of each
+   * (title, summary, files touched). Returns 'none' when there is no task
+   * memory for this project or nothing relevant is found.
+   */
+  private async searchProjectMemories(client: Anthropic | undefined, task: string): Promise<string> {
+    const root = this.tryWorkspaceRoot();
+    if (!root) {
+      return 'none';
+    }
+    const store = await this.ensureTaskMemory();
+    const candidates = store.forProject(root, 20);
+    if (candidates.length === 0) {
+      return 'none';
+    }
+    try {
+      const result = await findRelevantMemories(
+        client,
+        root,
+        task,
+        candidates.map((m) => ({ id: m.id, title: m.title, summary: m.summary })),
+        5
+      );
+      this.recordHaikuUsage('recall', this.sessions.current.id, result);
+      const byId = new Map(candidates.map((m) => [m.id, m]));
+      const matches = result.data.map((id) => byId.get(id)).filter((m): m is TaskMemory => !!m);
+      if (matches.length === 0) {
+        return 'none';
+      }
+      return matches
+        .map((m) => `- ${m.title}: ${m.summary} (files: ${Object.keys(m.files).join(', ') || 'none'})`)
+        .join('\n');
+    } catch (e: any) {
+      this.log.appendLine(`[search-memory error] ${e?.message ?? e}`);
+      return 'none';
+    }
   }
 
   /**

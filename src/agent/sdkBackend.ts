@@ -108,6 +108,14 @@ function buildWorkspaceFsServer(toolCtx: ToolContext) {
         },
         passthrough('get_diagnostics')
       ),
+      tool(
+        'search_memory',
+        'Search project memory for prior or related tasks before starting work; returns a summary of matching past tasks and files touched, or `none`.',
+        {
+          task_description: z.string().describe('What the current task is about'),
+        },
+        passthrough('search_memory')
+      ),
     ],
   });
 }

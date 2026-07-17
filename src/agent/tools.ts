@@ -175,6 +175,18 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
       required: ['questions'],
     },
   },
+  {
+    name: 'search_memory',
+    description:
+      'Search project memory for prior or related tasks before starting work; returns a summary of matching past tasks and files touched, or `none`.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task_description: { type: 'string', description: 'What the current task is about' },
+      },
+      required: ['task_description'],
+    },
+  },
 ];
 
 export interface AskQuestionItem {
@@ -222,6 +234,8 @@ export interface ToolContext {
   preprocessRead?: (path: string, content: string, task: string) => Promise<string | undefined>;
   /** Ask the user one or more clarifying multiple-choice questions in the chat. Resolves to answers keyed by question text. */
   askQuestion: (questions: AskQuestionItem[]) => Promise<Record<string, string>>;
+  /** Runs a background Haiku subagent over project/task memory to find prior or related work. Resolves to a short summary or `none`. Absent (e.g. credits-loop without a project) degrades to `none`. */
+  searchMemory?: (taskDescription: string) => Promise<string>;
 }
 
 function fileHash(content: string): string {
@@ -662,6 +676,13 @@ async function askQuestionTool(ctx: ToolContext, input: any): Promise<string> {
   return JSON.stringify({ answers });
 }
 
+async function searchMemoryTool(ctx: ToolContext, input: any): Promise<string> {
+  if (!ctx.searchMemory) {
+    return 'none';
+  }
+  return await ctx.searchMemory(String(input.task_description ?? ctx.taskSummary));
+}
+
 const EXECUTORS: Record<string, (ctx: ToolContext, input: any) => Promise<string>> = {
   read_file: readFileTool,
   write_file: writeFileTool,
@@ -672,6 +693,7 @@ const EXECUTORS: Record<string, (ctx: ToolContext, input: any) => Promise<string
   run_command: runCommandTool,
   get_diagnostics: diagnosticsTool,
   ask_question: askQuestionTool,
+  search_memory: searchMemoryTool,
 };
 
 export interface ToolOutcome {

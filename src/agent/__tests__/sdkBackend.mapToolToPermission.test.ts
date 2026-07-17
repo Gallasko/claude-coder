@@ -28,7 +28,7 @@ describe('mapToolToPermission', () => {
     expect(req?.title).toContain('(unknown path)');
   });
 
-  it.each(['WebSearch', 'WebFetch', 'TodoWrite', 'Task', 'Read', 'Grep', 'Glob'])(
+  it.each(['WebSearch', 'WebFetch', 'TodoWrite', 'Task', 'Read', 'Grep', 'Glob', 'search_memory'])(
     'allows %s silently (returns undefined)',
     (toolName) => {
       expect(mapToolToPermission(toolName, {}, ROOT)).toBeUndefined();
