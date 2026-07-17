@@ -43,7 +43,7 @@ describe('Controller.maybePromptCommit', () => {
     controller.handleAskQuestionResponse(card.id as number, { 'Commit these changes?': 'Commit' });
     await pending;
 
-    expect(commitSpy).toHaveBeenCalledWith('');
+    expect(commitSpy).toHaveBeenCalledWith('', 'claude');
   });
 
   it('does not commit when the user chooses "Not now"', async () => {

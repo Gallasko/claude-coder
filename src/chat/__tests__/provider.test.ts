@@ -80,7 +80,7 @@ describe('ChatViewProvider message dispatch', () => {
     ['showMemory', { type: 'showMemory' }, 'showMemory', []],
     ['resetPermissions', { type: 'resetPermissions' }, 'resetPermissions', []],
     ['runSetup', { type: 'runSetup' }, 'runSetup', []],
-    ['commit', { type: 'commit', text: 'msg' }, 'commitChanges', ['msg']],
+    ['commit', { type: 'commit', text: 'msg' }, 'commitChanges', ['msg', 'user']],
     ['deferred', { type: 'deferred', text: 'cancel 3' }, 'handleDeferredCommand', ['cancel 3']],
   ] as const)('%s dispatches to Controller.%s', async (_label, msg, method, args) => {
     await view.send(msg);

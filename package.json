@@ -140,6 +140,26 @@
           "default": "sonnet",
           "description": "Model alias for the subscription backend (sonnet | opus | haiku, or a full model id your plan supports)."
         },
+        "claudeCoder.commitAuthorName": {
+          "type": "string",
+          "default": "",
+          "description": "Fallback git author name used by /commit when git's user.name is unset."
+        },
+        "claudeCoder.commitAuthorEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Fallback git author email used by /commit when git's user.email is unset."
+        },
+        "claudeCoder.claudeCommitName": {
+          "type": "string",
+          "default": "Claude",
+          "description": "Git author name used for commits made automatically at the end of a task."
+        },
+        "claudeCoder.claudeCommitEmail": {
+          "type": "string",
+          "default": "noreply@anthropic.com",
+          "description": "Git author email used for commits made automatically at the end of a task."
+        },
         "claudeCoder.planningEnabled": {
           "type": "boolean",
           "default": true,

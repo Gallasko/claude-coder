@@ -579,11 +579,47 @@ export class Controller {
       },
     ]);
     if (answers[question] === 'Commit') {
-      await this.commitChanges('');
+      await this.commitChanges('', 'claude');
     }
   }
 
-  async commitChanges(message: string): Promise<void> {
+  /** Resolves `-c user.name=… -c user.email=…` overrides for `git commit`, or [] to use ambient git config. */
+  private async resolveCommitIdentity(root: string, identity: 'user' | 'claude'): Promise<string[]> {
+    if (identity === 'claude') {
+      const name = this.config().get<string>('claudeCommitName') || 'Claude';
+      const email = this.config().get<string>('claudeCommitEmail') || 'noreply@anthropic.com';
+      return ['-c', `user.name=${name}`, '-c', `user.email=${email}`];
+    }
+    let hasName = false;
+    let hasEmail = false;
+    try {
+      await execFileAsync('git', ['config', '--get', 'user.name'], { cwd: root });
+      hasName = true;
+    } catch {
+      // unset
+    }
+    try {
+      await execFileAsync('git', ['config', '--get', 'user.email'], { cwd: root });
+      hasEmail = true;
+    } catch {
+      // unset
+    }
+    if (hasName && hasEmail) {
+      return [];
+    }
+    const name = this.config().get<string>('commitAuthorName') || '';
+    const email = this.config().get<string>('commitAuthorEmail') || '';
+    const args: string[] = [];
+    if (!hasName && name) {
+      args.push('-c', `user.name=${name}`);
+    }
+    if (!hasEmail && email) {
+      args.push('-c', `user.email=${email}`);
+    }
+    return args;
+  }
+
+  async commitChanges(message: string, identity: 'user' | 'claude' = 'user'): Promise<void> {
     const root = this.tryWorkspaceRoot();
     if (!root) {
       this.post({ type: 'notice', text: 'Open a folder first — Claude Coder needs a workspace.' });
@@ -604,10 +640,14 @@ export class Controller {
 
     await execFileAsync('git', ['add', '-A'], { cwd: root });
     this.post({ type: 'notice', text: 'Committing changes…' });
-    const commitMessage = message.trim() || (await this.summarizedCommitMessage(root));
+    const trimmed = message.trim();
+    const commitMessage = trimmed
+      ? [trimmed, await this.summaryBody(root)].filter(Boolean).join('\n\n')
+      : await this.summarizedCommitMessage(root);
+    const idArgs = await this.resolveCommitIdentity(root, identity);
 
     try {
-      await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
+      await execFileAsync('git', [...idArgs, 'commit', '-m', commitMessage], { cwd: root });
       this.post({ type: 'notice', text: `Committed: ${commitMessage}` });
       void this.archiveChat(this.sessions.current);
     } catch (e) {
@@ -649,6 +689,16 @@ export class Controller {
       return `Update ${files.join(', ')}`;
     }
     return `Update ${files.slice(0, 3).join(', ')} and ${files.length - 3} more`;
+  }
+
+  /** Builds a "resume of modifications" body listing staged files by change status. */
+  private async summaryBody(root: string): Promise<string> {
+    const { stdout } = await execFileAsync('git', ['diff', '--cached', '--name-status'], { cwd: root });
+    const lines = stdout.trim().split('\n').filter(Boolean);
+    if (lines.length === 0) {
+      return '';
+    }
+    return lines.map((line) => `- ${line.replace(/\t/g, ' ')}`).join('\n');
   }
 
   // ---------- main entry: user sent a prompt ----------
