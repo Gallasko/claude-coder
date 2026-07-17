@@ -427,6 +427,12 @@ const memoryBannerEl = document.getElementById('memory-banner');
         card.dataset.questionId = String(msg.id);
 
         const questionEls = [];
+        const allInstant = (msg.questions || []).length > 0 && (msg.questions || []).every((q) => q.instant);
+        let submitBtn;
+
+        const respond = (finalAnswers) => {
+          vscode.postMessage({ type: 'askQuestionResponse', id: msg.id, answers: finalAnswers });
+        };
 
         (msg.questions || []).forEach((q) => {
           const qBlock = document.createElement('div');
@@ -454,6 +460,10 @@ const memoryBannerEl = document.getElementById('memory-banner');
               b.title = opt.description;
             }
             b.addEventListener('click', () => {
+              if (q.instant) {
+                respond({ [q.question]: opt.label });
+                return;
+              }
               if (q.multiSelect) {
                 if (selected.has(opt.label)) {
                   selected.delete(opt.label);
@@ -478,39 +488,37 @@ const memoryBannerEl = document.getElementById('memory-banner');
           questionEls.push({ question: q.question, selected });
         });
 
-        const actions = document.createElement('div');
-        actions.className = 'question-actions';
+        if (!allInstant) {
+          const actions = document.createElement('div');
+          actions.className = 'question-actions';
 
-        const respond = (finalAnswers) => {
-          vscode.postMessage({ type: 'askQuestionResponse', id: msg.id, answers: finalAnswers });
-        };
-
-        const submitBtn = document.createElement('button');
-        submitBtn.className = 'question-submit';
-        submitBtn.textContent = 'Submit';
-        submitBtn.disabled = questionEls.some((qe) => qe.selected.size === 0);
-        submitBtn.addEventListener('click', () => {
-          const finalAnswers = {};
-          questionEls.forEach((qe) => {
-            finalAnswers[qe.question] = Array.from(qe.selected).join(', ');
+          submitBtn = document.createElement('button');
+          submitBtn.className = 'question-submit';
+          submitBtn.textContent = 'Submit';
+          submitBtn.disabled = questionEls.some((qe) => qe.selected.size === 0);
+          submitBtn.addEventListener('click', () => {
+            const finalAnswers = {};
+            questionEls.forEach((qe) => {
+              finalAnswers[qe.question] = Array.from(qe.selected).join(', ');
+            });
+            respond(finalAnswers);
           });
-          respond(finalAnswers);
-        });
 
-        const skipBtn = document.createElement('button');
-        skipBtn.className = 'perm-no';
-        skipBtn.textContent = 'Skip';
-        skipBtn.addEventListener('click', () => {
-          const finalAnswers = {};
-          questionEls.forEach((qe) => {
-            finalAnswers[qe.question] = '';
+          const skipBtn = document.createElement('button');
+          skipBtn.className = 'perm-no';
+          skipBtn.textContent = 'Skip';
+          skipBtn.addEventListener('click', () => {
+            const finalAnswers = {};
+            questionEls.forEach((qe) => {
+              finalAnswers[qe.question] = '';
+            });
+            respond(finalAnswers);
           });
-          respond(finalAnswers);
-        });
 
-        actions.appendChild(submitBtn);
-        actions.appendChild(skipBtn);
-        card.appendChild(actions);
+          actions.appendChild(submitBtn);
+          actions.appendChild(skipBtn);
+          card.appendChild(actions);
+        }
 
         messagesEl.appendChild(card);
         scrollDown();

@@ -576,6 +576,7 @@ export class Controller {
           { label: 'Not now', description: 'Leave changes uncommitted' },
         ],
         multiSelect: false,
+        instant: true,
       },
     ]);
     if (answers[question] === 'Commit') {

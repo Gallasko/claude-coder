@@ -194,6 +194,8 @@ export interface AskQuestionItem {
   header: string;
   options: { label: string; description: string }[];
   multiSelect: boolean;
+  /** When true, clicking an option answers immediately — no Submit/Skip buttons. Only meaningful for single-question, non-multiSelect cards. */
+  instant?: boolean;
 }
 
 export interface PermissionRequest {
