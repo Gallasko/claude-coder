@@ -618,10 +618,11 @@ async function runCommandTool(ctx: ToolContext, input: any): Promise<string> {
   if (!ok) {
     return DENIED;
   }
+  const isWin = process.platform === 'win32';
   return new Promise((resolve) => {
     execFile(
-      '/bin/bash',
-      ['-c', command],
+      isWin ? process.env.ComSpec || 'cmd.exe' : '/bin/bash',
+      isWin ? ['/d', '/s', '/c', command] : ['-c', command],
       { cwd: ctx.workspaceRoot, timeout: COMMAND_TIMEOUT_MS, maxBuffer: 4_000_000 },
       (error, stdout, stderr) => {
         const code = error ? ((error as any).code ?? 1) : 0;
