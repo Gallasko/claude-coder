@@ -42,8 +42,7 @@ const memoryBannerEl = document.getElementById('memory-banner');
     }
     workingEl.querySelector('.working-label').textContent =
       phase + ' · ~' + fmtTok(tokens) + ' tok';
-    messagesEl.appendChild(workingEl); // keep it pinned at the bottom
-    scrollDown();
+    pinSticky();
   }
 
   function clearWorking() {
@@ -87,10 +86,7 @@ const memoryBannerEl = document.getElementById('memory-banner');
   function appendThinking(text) {
     ensureThinking();
     thinkingBodyEl.textContent += text;
-    if (workingEl) {
-      messagesEl.appendChild(workingEl); // stay pinned below
-    }
-    scrollDown();
+    pinSticky();
   }
 
   function clearThinking() {
@@ -172,6 +168,18 @@ const memoryBannerEl = document.getElementById('memory-banner');
 
   function scrollDown() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // Keep the thinking block and working indicator pinned at the very bottom,
+  // below any tool/assistant messages appended after them.
+  function pinSticky() {
+    if (thinkingEl) {
+      messagesEl.appendChild(thinkingEl);
+    }
+    if (workingEl) {
+      messagesEl.appendChild(workingEl);
+    }
+    scrollDown();
   }
 
   function addMsg(cls, text) {
@@ -259,10 +267,7 @@ const memoryBannerEl = document.getElementById('memory-banner');
         }
         streamRaw += msg.text;
         streamEl.innerHTML = renderMarkdown(streamRaw);
-        if (workingEl) {
-          messagesEl.appendChild(workingEl); // stay below the streaming text
-        }
-        scrollDown();
+        pinSticky();
         break;
       case 'working':
         updateWorking(msg.phase, msg.tokens);
@@ -276,10 +281,12 @@ const memoryBannerEl = document.getElementById('memory-banner');
       case 'toolUse':
         streamEl = null;
         addMsg('tool', '⚙ ' + msg.name + '  ' + (msg.detail || ''));
+        pinSticky();
         break;
       case 'toolResult':
         if (!msg.ok) {
           addMsg('tool error', '✗ ' + msg.name + ': ' + (msg.preview || 'failed'));
+          pinSticky();
         }
         break;
       case 'permission': {
