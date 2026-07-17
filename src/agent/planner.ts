@@ -38,6 +38,8 @@ export interface PlanOptions {
   context?: string;
   signal?: AbortSignal;
   onToolUse?: (name: string, detail: string) => void;
+  /** Live activity signal: current phase + accumulated output tokens so far. */
+  onProgress?: (phase: string, approxTokens: number) => void;
 }
 
 /**
@@ -109,6 +111,7 @@ export async function planTask(
       { signal: opts.signal }
     );
     addUsage(response.usage);
+    opts.onProgress?.(exploring ? 'planning: exploring' : 'planning: drafting', usage.output_tokens);
 
     const toolUses = response.content.filter(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use'
@@ -139,6 +142,7 @@ export async function planTask(
           { signal: opts.signal }
         );
         addUsage(cont.usage);
+        opts.onProgress?.('planning: drafting', usage.output_tokens);
         messages.pop();
         const t = cont.content.find((b) => b.type === 'text');
         plan = plan.trimEnd() + (t && t.type === 'text' ? t.text : '');

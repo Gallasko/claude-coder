@@ -550,6 +550,8 @@ export interface SubscriptionPlanParams {
   maxToolCalls: number;
   abort: AbortController;
   onToolUse?: (name: string, detail: string) => void;
+  /** Live activity signal: current phase + approximate output tokens so far. */
+  onProgress?: (phase: string, approxTokens: number) => void;
 }
 
 export interface SubscriptionPlanResult {
@@ -607,14 +609,17 @@ export async function runSubscriptionPlan(p: SubscriptionPlanParams): Promise<Su
   for await (const message of query({ prompt: p.prompt, options }) as AsyncIterable<SDKMessage>) {
     switch (message.type) {
       case 'assistant': {
+        let exploring = false;
         for (const block of message.message.content) {
           if (block.type === 'tool_use') {
             toolCalls += 1;
+            exploring = true;
             p.onToolUse?.(block.name, previewToolInput(block.input));
           } else if (block.type === 'text' && message.parent_tool_use_id == null) {
             plan = block.text;
           }
         }
+        p.onProgress?.(exploring ? 'planning: exploring' : 'planning: drafting', Math.round(plan.length / CHARS_PER_TOKEN));
         break;
       }
 

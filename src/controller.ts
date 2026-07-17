@@ -1470,6 +1470,7 @@ export class Controller {
             maxToolCalls: this.planningMaxToolCalls(),
             abort: this.abort!,
             onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+            onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
           });
           if ((!subResult.isError || subResult.errorText === 'error_max_turns') && subResult.plan) {
             plan = subResult.plan;
@@ -1515,6 +1516,7 @@ export class Controller {
             context: plannerContext,
             signal: this.abort?.signal,
             onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+            onProgress: (phase, tokens) => this.post({ type: 'working', phase, tokens }),
           });
           const totals = emptyTotals();
           addUsage(totals, creditsResult.usage);
