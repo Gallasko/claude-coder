@@ -252,6 +252,26 @@ body {
   word-break: normal;
 }
 
+.plan-change-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0;
+  padding: 6px 8px;
+  font-family: var(--vscode-font-family);
+  font-size: 0.9em;
+  min-height: 48px;
+  resize: vertical;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 4px;
+}
+
+.perm-buttons .perm-escalate {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
 .msg.question {
   border: 1px solid var(--vscode-inputValidation-infoBorder, #3794ff);
   border-radius: 6px;

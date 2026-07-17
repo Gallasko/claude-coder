@@ -72,6 +72,7 @@ export interface UiSink {
 const execFileAsync = promisify(execFile);
 
 type PermissionChoice = 'yes' | 'always' | 'no';
+type PlanDecision = { action: 'approve' | 'reject' | 'escalate' | 'change'; text?: string };
 
 export class Controller {
   private client: Anthropic | undefined;
@@ -99,6 +100,7 @@ export class Controller {
 
   private permissionResolvers = new Map<number, (choice: PermissionChoice) => void>();
   private questionResolvers = new Map<number, (answers: Record<string, string>) => void>();
+  private planResolvers = new Map<number, (decision: PlanDecision) => void>();
   private permissionId = 0;
   /** Virtual document content for diff-preview URIs (scheme `claude-coder-diff`), keyed by uri.toString(). */
   private diffVirtualContent = new Map<string, string>();
@@ -452,6 +454,15 @@ export class Controller {
     }
   }
 
+  handlePlanResponse(id: number, action: string, text?: string): void {
+    const resolver = this.planResolvers.get(Number(id));
+    if (resolver) {
+      const a: PlanDecision['action'] =
+        action === 'approve' || action === 'escalate' || action === 'change' ? action : 'reject';
+      resolver(a === 'change' ? { action: a, text } : { action: a });
+    }
+  }
+
   /** Puts a clarifying multiple-choice question card in the chat and waits for the user's answers. */
   private async requestQuestion(questions: AskQuestionItem[]): Promise<Record<string, string>> {
     const id = ++this.permissionId;
@@ -504,10 +515,10 @@ export class Controller {
   }
 
   /** Same plumbing as requestPermission, but no autoApprove/alwaysAllowed bypass — plan review is never silent. */
-  private async requestPlanApproval(plan: string): Promise<boolean> {
+  private async requestPlanApproval(plan: string): Promise<PlanDecision> {
     const id = ++this.permissionId;
-    const choicePromise = new Promise<PermissionChoice>((resolve) => {
-      this.permissionResolvers.set(id, resolve);
+    const decisionPromise = new Promise<PlanDecision>((resolve) => {
+      this.planResolvers.set(id, resolve);
     });
     let planFile: { uri: vscode.Uri; fsPath: string };
     try {
@@ -516,16 +527,16 @@ export class Controller {
       // Never leave a resolver registered for a card that was never shown —
       // the caller (planIfNeeded) already treats this failure as "proceed
       // without approval," so failing to clean up here would leak this id
-      // in permissionResolvers forever.
-      this.permissionResolvers.delete(id);
+      // in planResolvers forever.
+      this.planResolvers.delete(id);
       throw e;
     }
     this.post({ type: 'permission', id, kind: 'plan', title: 'Plan ready — proceed with implementation?', detail: plan });
-    const choice = await choicePromise;
-    this.permissionResolvers.delete(id);
-    this.post({ type: 'permissionResolved', id, choice });
-    await this.closePlanFile(planFile, /* keep */ choice !== 'no');
-    return choice !== 'no';
+    const decision = await decisionPromise;
+    this.planResolvers.delete(id);
+    this.post({ type: 'permissionResolved', id, choice: decision.action === 'approve' ? 'yes' : 'no' });
+    await this.closePlanFile(planFile, /* keep */ decision.action === 'approve');
+    return decision;
   }
 
   private requirePlanApproval(): boolean {
@@ -1378,105 +1389,116 @@ export class Controller {
       // Plan on the same backend the turn will run on: subscription sessions
       // draft the plan through the Agent SDK (billed to the Pro/Max plan, no
       // credits spent) before ever falling back to the credits reasoning tier.
-      let plan = '';
-      let toolCalls = 0;
-      let truncated = false;
-      let truncatedBySubMaxTurns = false;
-      let noticeText = '';
+      let changeFeedback = '';
+      let redraftsUsed = 0;
+      const MAX_PLAN_REDRAFTS = 5;
+      draftLoop: for (;;) {
+        const planPrompt = changeFeedback
+          ? `${text}\n\nRevise the previous plan addressing this feedback:\n${changeFeedback}`
+          : text;
 
-      const subAlias = this.subscriptionModelAlias(model);
-      if (session.backend === 'subscription' && subAlias && plannerCtx && this.tryWorkspaceRoot()) {
-        const subResult = await runSubscriptionPlan({
-          prompt: [
-            plannerContext,
-            session.taskSummary ? `Task: ${session.taskSummary}` : '',
-            `Request:\n"""${text.slice(0, 4000)}"""`,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          workspaceRoot: this.workspaceRoot(),
-          toolCtx: plannerCtx,
-          model: subAlias,
-          maxToolCalls: this.planningMaxToolCalls(),
-          abort: this.abort!,
-          onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
-        });
-        if ((!subResult.isError || subResult.errorText === 'error_max_turns') && subResult.plan) {
-          plan = subResult.plan;
-          toolCalls = subResult.toolCalls;
-          truncatedBySubMaxTurns = subResult.errorText === 'error_max_turns';
-          truncated = subResult.truncated || truncatedBySubMaxTurns;
-          this.subTotals.inputTokens += subResult.usage.inputTokens;
-          this.subTotals.outputTokens += subResult.usage.outputTokens;
-          this.subTotals.cacheReadTokens += subResult.usage.cacheReadTokens;
-          this.subTotals.cacheWriteTokens += subResult.usage.cacheWriteTokens;
-          this.subTotals.requests += 1;
-          this.subValueUsd += subResult.estValueUsd;
-          this.recordUsage({
+        let plan = '';
+        let toolCalls = 0;
+        let truncated = false;
+        let truncatedBySubMaxTurns = false;
+        let noticeText = '';
+
+        const subAlias = this.subscriptionModelAlias(model);
+        if (session.backend === 'subscription' && subAlias && plannerCtx && this.tryWorkspaceRoot()) {
+          const subResult = await runSubscriptionPlan({
+            prompt: [
+              plannerContext,
+              session.taskSummary ? `Task: ${session.taskSummary}` : '',
+              `Request:\n"""${planPrompt.slice(0, 4000)}"""`,
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+            workspaceRoot: this.workspaceRoot(),
+            toolCtx: plannerCtx,
             model: subAlias,
-            backend: 'subscription',
+            maxToolCalls: this.planningMaxToolCalls(),
+            abort: this.abort!,
+            onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+          });
+          if ((!subResult.isError || subResult.errorText === 'error_max_turns') && subResult.plan) {
+            plan = subResult.plan;
+            toolCalls = subResult.toolCalls;
+            truncatedBySubMaxTurns = subResult.errorText === 'error_max_turns';
+            truncated = subResult.truncated || truncatedBySubMaxTurns;
+            this.subTotals.inputTokens += subResult.usage.inputTokens;
+            this.subTotals.outputTokens += subResult.usage.outputTokens;
+            this.subTotals.cacheReadTokens += subResult.usage.cacheReadTokens;
+            this.subTotals.cacheWriteTokens += subResult.usage.cacheWriteTokens;
+            this.subTotals.requests += 1;
+            this.subValueUsd += subResult.estValueUsd;
+            this.recordUsage({
+              model: subAlias,
+              backend: 'subscription',
+              kind: 'plan',
+              sessionId: session.id,
+              inputTokens: subResult.usage.inputTokens,
+              outputTokens: subResult.usage.outputTokens,
+              cacheReadTokens: subResult.usage.cacheReadTokens,
+              cacheWriteTokens: subResult.usage.cacheWriteTokens,
+              costUsd: subResult.estValueUsd,
+            });
+            this.chatHistoryStore?.addUsage(session.id, {
+              backend: 'subscription',
+              inputTokens: subResult.usage.inputTokens,
+              outputTokens: subResult.usage.outputTokens,
+              cacheReadTokens: subResult.usage.cacheReadTokens,
+              cacheWriteTokens: subResult.usage.cacheWriteTokens,
+              costUsd: subResult.estValueUsd,
+              assistantChars: 0,
+            });
+            noticeText = `Plan drafted by ${displayName(model)} on your subscription (no credits)${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (plan value ~${formatUsd(subResult.estValueUsd)}):\n${summarizePlan(plan)}`;
+          } else {
+            this.log.appendLine(`[sub planner fallback] ${subResult.errorText ?? 'no plan produced'}`);
+          }
+        }
+
+        if (!plan && client) {
+          const creditsResult = await planTask(client, model, session.taskSummary, planPrompt, this.planningMaxTokens(), {
+            toolCtx: plannerCtx,
+            maxToolCalls: this.planningMaxToolCalls(),
+            context: plannerContext,
+            signal: this.abort?.signal,
+            onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
+          });
+          const totals = emptyTotals();
+          addUsage(totals, creditsResult.usage);
+          this.plannerCost += costUsd(totals, model);
+          this.plannerRequests += 1;
+          this.recordUsage({
+            model,
+            backend: 'credits',
             kind: 'plan',
             sessionId: session.id,
-            inputTokens: subResult.usage.inputTokens,
-            outputTokens: subResult.usage.outputTokens,
-            cacheReadTokens: subResult.usage.cacheReadTokens,
-            cacheWriteTokens: subResult.usage.cacheWriteTokens,
-            costUsd: subResult.estValueUsd,
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            cacheReadTokens: totals.cacheReadTokens,
+            cacheWriteTokens: totals.cacheWriteTokens,
+            costUsd: costUsd(totals, model),
           });
           this.chatHistoryStore?.addUsage(session.id, {
-            backend: 'subscription',
-            inputTokens: subResult.usage.inputTokens,
-            outputTokens: subResult.usage.outputTokens,
-            cacheReadTokens: subResult.usage.cacheReadTokens,
-            cacheWriteTokens: subResult.usage.cacheWriteTokens,
-            costUsd: subResult.estValueUsd,
+            backend: 'credits',
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            cacheReadTokens: totals.cacheReadTokens,
+            cacheWriteTokens: totals.cacheWriteTokens,
+            costUsd: costUsd(totals, model),
             assistantChars: 0,
           });
-          noticeText = `Plan drafted by ${displayName(model)} on your subscription (no credits)${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (plan value ~${formatUsd(subResult.estValueUsd)}):\n${summarizePlan(plan)}`;
-        } else {
-          this.log.appendLine(`[sub planner fallback] ${subResult.errorText ?? 'no plan produced'}`);
+          plan = creditsResult.plan;
+          toolCalls = creditsResult.toolCalls;
+          truncated = creditsResult.truncated;
+          noticeText = `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`;
         }
-      }
 
-      if (!plan && client) {
-        const creditsResult = await planTask(client, model, session.taskSummary, text, this.planningMaxTokens(), {
-          toolCtx: plannerCtx,
-          maxToolCalls: this.planningMaxToolCalls(),
-          context: plannerContext,
-          signal: this.abort?.signal,
-          onToolUse: (name, detail) => this.post({ type: 'toolUse', name: `plan:${name}`, detail }),
-        });
-        const totals = emptyTotals();
-        addUsage(totals, creditsResult.usage);
-        this.plannerCost += costUsd(totals, model);
-        this.plannerRequests += 1;
-        this.recordUsage({
-          model,
-          backend: 'credits',
-          kind: 'plan',
-          sessionId: session.id,
-          inputTokens: totals.inputTokens,
-          outputTokens: totals.outputTokens,
-          cacheReadTokens: totals.cacheReadTokens,
-          cacheWriteTokens: totals.cacheWriteTokens,
-          costUsd: costUsd(totals, model),
-        });
-        this.chatHistoryStore?.addUsage(session.id, {
-          backend: 'credits',
-          inputTokens: totals.inputTokens,
-          outputTokens: totals.outputTokens,
-          cacheReadTokens: totals.cacheReadTokens,
-          cacheWriteTokens: totals.cacheWriteTokens,
-          costUsd: costUsd(totals, model),
-          assistantChars: 0,
-        });
-        plan = creditsResult.plan;
-        toolCalls = creditsResult.toolCalls;
-        truncated = creditsResult.truncated;
-        noticeText = `Plan drafted by ${displayName(model)}${toolCalls ? ` after ${toolCalls} code lookup${toolCalls === 1 ? '' : 's'}` : ''} (${formatUsd(costUsd(totals, model))}):\n${summarizePlan(plan)}`;
-      }
+        if (!plan) {
+          return true;
+        }
 
-      if (plan) {
         session.plan = plan;
         this.post({ type: 'notice', text: noticeText });
         if (truncated) {
@@ -1487,17 +1509,44 @@ export class Controller {
               : 'The plan hit its output cap even after continuing — it may be incomplete. Raise claudeCoder.planningMaxTokens if this keeps happening.',
           });
         }
+
         // Escalation continuations (carryOver set) already got an explicit "escalate?" confirmation — don't ask twice.
-        if (session.carryOver === undefined && this.requirePlanApproval()) {
-          const approved = await this.requestPlanApproval(plan);
-          if (!approved) {
+        if (session.carryOver !== undefined || !this.requirePlanApproval()) {
+          return true;
+        }
+
+        for (;;) {
+          const decision = await this.requestPlanApproval(plan);
+          if (decision.action === 'approve') {
+            return true;
+          }
+          if (decision.action === 'reject') {
             session.plan = undefined;
             this.post({ type: 'notice', text: 'Plan rejected — send new instructions to draft another plan.' });
             return false;
           }
+          if (decision.action === 'escalate') {
+            session.plan = undefined;
+            // escalate() re-enters handleUserMessage — let this turn's finally
+            // release the busy flag first (same pattern as the sub usage-limit escalate above).
+            setTimeout(() => void this.escalate(), 0);
+            return false;
+          }
+          // 'change': re-draft with feedback, unless the redraft cap is spent —
+          // then keep asking for a decision on the plan already drafted.
+          if (redraftsUsed >= MAX_PLAN_REDRAFTS) {
+            this.post({
+              type: 'notice',
+              text: 'Reached the change-request limit for this plan — approve, reject, or escalate to continue.',
+            });
+            continue;
+          }
+          redraftsUsed++;
+          changeFeedback = decision.text ?? '';
+          this.post({ type: 'notice', text: 'Re-drafting plan with your changes…' });
+          continue draftLoop;
         }
       }
-      return true;
     } catch (e: any) {
       if (this.abort?.signal.aborted) {
         throw new Error('cancelled');

@@ -34,8 +34,8 @@ describe('Controller plan-approval flow', () => {
     const { controller, posted, context } = await makeController();
     const pending = (controller as any).requestPlanApproval('my plan text');
     const card = await waitForCard(posted, (m) => m.type === 'permission' && m.kind === 'plan');
-    controller.handlePermissionResponse(card.id as number, 'yes');
-    await expect(pending).resolves.toBe(true);
+    controller.handlePlanResponse(card.id as number, 'approve');
+    await expect(pending).resolves.toEqual({ action: 'approve' });
     expect(window.showTextDocument).toHaveBeenCalledTimes(1);
     const plansDir = path.join(context.globalStorageUri.fsPath, 'plans');
     const files = await fs.readdir(plansDir);
@@ -46,8 +46,8 @@ describe('Controller plan-approval flow', () => {
     const { controller, posted, context } = await makeController();
     const pending = (controller as any).requestPlanApproval('my plan text');
     const card = await waitForCard(posted, (m) => m.type === 'permission' && m.kind === 'plan');
-    controller.handlePermissionResponse(card.id as number, 'no');
-    await expect(pending).resolves.toBe(false);
+    controller.handlePlanResponse(card.id as number, 'reject');
+    await expect(pending).resolves.toEqual({ action: 'reject' });
     const plansDir = path.join(context.globalStorageUri.fsPath, 'plans');
     await expect(fs.readdir(plansDir)).rejects.toThrow();
   });
@@ -60,7 +60,7 @@ describe('Controller plan-approval flow', () => {
       const { controller } = await makeController();
       window.showTextDocument.mockRejectedValue(new Error('stream closed'));
       await expect((controller as any).requestPlanApproval('my plan text')).rejects.toThrow('stream closed');
-      expect((controller as any).permissionResolvers.size).toBe(0);
+      expect((controller as any).planResolvers.size).toBe(0);
       expect(window.showTextDocument).toHaveBeenCalledTimes(3); // withTransientRetry's default 3 attempts
     },
     5000
@@ -73,8 +73,8 @@ describe('Controller plan-approval flow', () => {
       window.showTextDocument.mockRejectedValueOnce(new Error('stream closed')).mockResolvedValueOnce(undefined);
       const pending = (controller as any).requestPlanApproval('my plan text');
       const card = await waitForCard(posted, (m) => m.type === 'permission' && m.kind === 'plan');
-      controller.handlePermissionResponse(card.id as number, 'yes');
-      await expect(pending).resolves.toBe(true);
+      controller.handlePlanResponse(card.id as number, 'approve');
+      await expect(pending).resolves.toEqual({ action: 'approve' });
       expect(window.showTextDocument).toHaveBeenCalledTimes(2);
     },
     5000

@@ -302,14 +302,64 @@ const memoryBannerEl = document.getElementById('memory-banner');
           card.appendChild(detail);
         }
 
+        let changeInput = null;
+        if (isPlan) {
+          changeInput = document.createElement('textarea');
+          changeInput.className = 'plan-change-input';
+          changeInput.placeholder = 'Request changes to the plan…';
+          card.appendChild(changeInput);
+        }
+
         const buttons = document.createElement('div');
         buttons.className = 'perm-buttons';
-        (isPlan
-          ? [
-              ['yes', 'Approve'],
-              ['no', 'Reject'],
-            ]
-          : isDiff
+        if (isPlan) {
+          const dismiss = () => {
+            const b = card.querySelector('.perm-buttons');
+            if (b) b.remove();
+            if (changeInput) changeInput.remove();
+          };
+          const approveBtn = document.createElement('button');
+          approveBtn.textContent = 'Approve';
+          approveBtn.className = 'perm-yes';
+          approveBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'planResponse', id: msg.id, action: 'approve' });
+            dismiss();
+          });
+          buttons.appendChild(approveBtn);
+
+          const changeBtn = document.createElement('button');
+          changeBtn.textContent = 'Request changes';
+          changeBtn.className = 'perm-change';
+          changeBtn.addEventListener('click', () => {
+            const text = (changeInput.value || '').trim();
+            if (!text) {
+              changeInput.focus();
+              return;
+            }
+            vscode.postMessage({ type: 'planResponse', id: msg.id, action: 'change', text });
+            dismiss();
+          });
+          buttons.appendChild(changeBtn);
+
+          const escalateBtn = document.createElement('button');
+          escalateBtn.textContent = 'Escalate';
+          escalateBtn.className = 'perm-escalate';
+          escalateBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'planResponse', id: msg.id, action: 'escalate' });
+            dismiss();
+          });
+          buttons.appendChild(escalateBtn);
+
+          const rejectBtn = document.createElement('button');
+          rejectBtn.textContent = 'Reject';
+          rejectBtn.className = 'perm-no';
+          rejectBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'planResponse', id: msg.id, action: 'reject' });
+            dismiss();
+          });
+          buttons.appendChild(rejectBtn);
+        } else {
+          (isDiff
             ? [
                 ['yes', 'Apply'],
                 ['always', "Apply, don't ask again"],
@@ -320,15 +370,16 @@ const memoryBannerEl = document.getElementById('memory-banner');
                 ['always', "Yes, don't ask again"],
                 ['no', 'No'],
               ]
-        ).forEach(([choice, label]) => {
-          const b = document.createElement('button');
-          b.textContent = label;
-          b.className = 'perm-' + choice;
-          b.addEventListener('click', () => {
-            vscode.postMessage({ type: 'permissionResponse', id: msg.id, choice });
+          ).forEach(([choice, label]) => {
+            const b = document.createElement('button');
+            b.textContent = label;
+            b.className = 'perm-' + choice;
+            b.addEventListener('click', () => {
+              vscode.postMessage({ type: 'permissionResponse', id: msg.id, choice });
+            });
+            buttons.appendChild(b);
           });
-          buttons.appendChild(b);
-        });
+        }
         card.appendChild(buttons);
         messagesEl.appendChild(card);
         scrollDown();
