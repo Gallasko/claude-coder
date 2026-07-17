@@ -104,6 +104,46 @@ export async function summarizeCommitMessage(
   return { ...result, data: parsed.message.trim() };
 }
 
+const DIFF_SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: {
+      type: 'string',
+      description: 'A short bulleted summary of what changed and why, one "- " line per logical change.',
+    },
+  },
+  required: ['summary'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Cheap Haiku call (subscription-first, credits fallback) that turns a
+ * staged git diff into a bulleted change summary — used as the commit body
+ * by /commit when the user supplies their own subject line.
+ */
+export async function summarizeDiff(
+  client: Anthropic | undefined,
+  workspaceRoot: string | undefined,
+  diff: string
+): Promise<SummaryTaskResult<string>> {
+  const trimmedDiff = diff.slice(0, 12000);
+  if (!trimmedDiff.trim()) {
+    throw new Error('no diff to summarize');
+  }
+  const result = await runHaikuTask({
+    client,
+    workspaceRoot,
+    schema: DIFF_SUMMARY_SCHEMA,
+    maxTokens: 350,
+    prompt: [
+      'Summarize the following staged git diff as a concise bulleted list of the changes made. Focus on what changed and why.',
+      `Diff:\n"""${trimmedDiff}"""`,
+    ].join('\n'),
+  });
+  const parsed = (result.structured ?? JSON.parse(result.text)) as { summary: string };
+  return { ...result, data: parsed.summary.trim() };
+}
+
 export interface ChatCandidate {
   chatId: number;
   summary: string;

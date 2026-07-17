@@ -45,6 +45,7 @@ import {
   summarizeSession,
   findRelevantChats,
   summarizeCommitMessage,
+  summarizeDiff,
   summarizeFile,
   preprocessFileForPlanning,
   createTaskMemory,
@@ -692,8 +693,30 @@ export class Controller {
     return `Update ${files.slice(0, 3).join(', ')} and ${files.length - 3} more`;
   }
 
-  /** Builds a "resume of modifications" body listing staged files by change status. */
+  /**
+   * Builds a prose/bulleted summary of the staged changes for the commit
+   * body. A cheap Haiku call (subscription-first, credits fallback)
+   * summarizes the staged diff; falls back to a file-status list if neither
+   * backend is available or the summary call fails.
+   */
   private async summaryBody(root: string): Promise<string> {
+    const { stdout: diff } = await execFileAsync('git', ['diff', '--cached'], { cwd: root });
+    if (!diff.trim()) {
+      return '';
+    }
+    try {
+      const client = await this.tryGetClient();
+      const result = await summarizeDiff(client, root, diff);
+      this.recordHaikuUsage('summarize', this.sessions.current.id, result);
+      return result.data || (await this.fileStatusBody(root));
+    } catch (e: any) {
+      this.log.appendLine(`[commit diff summarize error] ${e?.message ?? e}`);
+      return await this.fileStatusBody(root);
+    }
+  }
+
+  /** Falls back to a "resume of modifications" body listing staged files by change status. */
+  private async fileStatusBody(root: string): Promise<string> {
     const { stdout } = await execFileAsync('git', ['diff', '--cached', '--name-status'], { cwd: root });
     const lines = stdout.trim().split('\n').filter(Boolean);
     if (lines.length === 0) {
